@@ -193,6 +193,7 @@ void GameScene::dispatch(const SDL_Event &event)
 void GameScene::onCreate(uint32_t tick)
 {
 	Scene::onCreate(tick);
+	settings_ = loadGameSettings(); // 速さ・カメラ・クロスフェードなどの調整値(res/lua/data/game_settings.lua。F5で読み直す)
 	auto &window = vulkanWindow(*this);
 	auto &res = getResources();
 	window.setScreenSize(static_cast<float>(res.getScreenWidth()), static_cast<float>(res.getScreenHeight()));
@@ -314,17 +315,17 @@ bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
 {
 	const float beforeX = playerX_, beforeZ = playerZ_;
 	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
-	const float targetX = std::clamp(playerX_ + dirX * distance, kPlayerRadius, fieldWidth() - kPlayerRadius);
-	const float targetZ = std::clamp(playerZ_ + dirZ * distance, kPlayerRadius, fieldDepth() - kPlayerRadius);
+	const float targetX = std::clamp(playerX_ + dirX * distance, settings_.player.radius, fieldWidth() - settings_.player.radius);
+	const float targetZ = std::clamp(playerZ_ + dirZ * distance, settings_.player.radius, fieldDepth() - settings_.player.radius);
 	// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
-	field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ, maxSlope);
+	field::moveOnField(map_, movementRules_, settings_.player.radius, playerX_, playerZ_, targetX, targetZ, maxSlope);
 	// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
 	float pushedX = playerX_, pushedZ = playerZ_;
-	if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
-		pushedX = std::clamp(pushedX, kPlayerRadius, fieldWidth() - kPlayerRadius);
-		pushedZ = std::clamp(pushedZ, kPlayerRadius, fieldDepth() - kPlayerRadius);
+	if(propCollision_.resolve(pushedX, pushedZ, settings_.player.radius)){
+		pushedX = std::clamp(pushedX, settings_.player.radius, fieldWidth() - settings_.player.radius);
+		pushedZ = std::clamp(pushedZ, settings_.player.radius, fieldDepth() - settings_.player.radius);
 		float checkX = playerX_, checkZ = playerZ_;
-		if(field::moveOnField(map_, movementRules_, kPlayerRadius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
+		if(field::moveOnField(map_, movementRules_, settings_.player.radius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
 			playerX_ = pushedX;
 			playerZ_ = pushedZ;
 		}
@@ -364,21 +365,19 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	bool attack[4] = {keys[SDL_SCANCODE_X] != 0, keys[SDL_SCANCODE_V] != 0, keys[SDL_SCANCODE_Z] != 0, keys[SDL_SCANCODE_C] != 0}; // R1 R2 L1 L2
 	// ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックでカメラ(視点)を回す
 	if(const auto pad = getResources().getGamepad()){
-		constexpr float kCameraYawSpeed = 2.6f;   // 右スティックを倒しきったときの、水平の回転の速さ(ラジアン/秒)
-		constexpr float kCameraPitchSpeed = 1.6f; // 同、上下
 		float lx, ly, rx, ry;
 		pad->leftStick(lx, ly);
 		pad->rightStick(rx, ry);
 		right += lx;
 		forward -= ly; // スティックは下が+
-		run = run || std::sqrt(lx * lx + ly * ly) >= kRunStick;
-		cameraYaw_ -= rx * kCameraYawSpeed * sensitivity_ * dt;
-		cameraPitch_ = std::clamp(cameraPitch_ + ry * kCameraPitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
+		run = run || std::sqrt(lx * lx + ly * ly) >= settings_.input.runStick;
+		cameraYaw_ -= rx * settings_.camera.yawSpeed * sensitivity_ * dt;
+		cameraPitch_ = std::clamp(cameraPitch_ + ry * settings_.camera.pitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
 		actionDown = actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
 		attack[0] = attack[0] || pad->button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-		attack[1] = attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > kTriggerOn;
+		attack[1] = attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > settings_.input.triggerOn;
 		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > kTriggerOn;
+		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
 	}
 	static const bool autoWalk = SDL_getenv("VULKAN_AUTOWALK") != nullptr; // 動作確認用: 常に前へ進む入力にする
 	forward = autoWalk ? 1.0f : forward;
@@ -426,7 +425,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		actionHeldTime_ += dt;
 	}
 	if(actionHeld_ && !actionDown){
-		if(actionHeldTime_ < kTapTime && !busy){
+		if(actionHeldTime_ < settings_.input.tapTime && !busy){
 			startAction(MotionRoll, dx, dz); // 単押し
 		}
 		actionHeldTime_ = 0.0f;
@@ -453,7 +452,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		wanted = motion_;
 		const auto &player = motions_[motion_];
 		if(motion_ == MotionRoll){
-			stepMove(rollDirX_, rollDirZ_, kRollDistance / player->duration() * dt);
+			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance / player->duration() * dt);
 		}
 		motionTime_ += dt;
 		if(motionTime_ >= player->duration()){
@@ -466,21 +465,21 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		float speed = 0.0f;
 		if(length > 0.0f){
 			walking_ = true;
-			const bool fast = run && actionDown && actionHeldTime_ >= kTapTime;
+			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
 			// 向かう先が、歩いては登れない少し急な坂なら、ゆっくり登る(これより急な坂は、進めない)
 			const float ahead = field::slopeAhead(map_, playerX_, playerZ_, dx, dz);
-			const bool climbing = motions_[MotionClimb] && ahead > movementRules_.maxSlope * kClimbEnter && ahead <= movementRules_.maxClimbSlope;
+			const bool climbing = motions_[MotionClimb] && ahead > movementRules_.maxSlope * settings_.player.climbEnter && ahead <= movementRules_.maxClimbSlope;
 			if(climbing){
 				wanted = MotionClimb;
-				speed = kClimbSpeed;
+				speed = settings_.player.climbSpeed;
 			}
 			else if(run){
 				wanted = fast ? MotionFastRun : MotionSlowRun;
-				speed = fast ? kFastRunSpeed : kSlowRunSpeed;
+				speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
 			}
 			else{
 				wanted = MotionWalk;
-				speed = kWalkSpeed * magnitude;
+				speed = settings_.player.walkSpeed * magnitude;
 			}
 			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
 				wanted = MotionWalk;
@@ -488,11 +487,11 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 			const float limit = wanted == MotionClimb ? movementRules_.maxClimbSlope * 1.05f : -1.0f;
 			if(!stepMove(dx, dz, speed * dt, limit) && wanted != MotionClimb && motions_[MotionClimb] && ahead > 0.0f){
 				// 歩いては進めなかった(セルごとの勾配が、先の平均より急だったとき): 登れる坂なら、ゆっくり登る
-				if(stepMove(dx, dz, kClimbSpeed * dt, movementRules_.maxClimbSlope * 1.05f)){
+				if(stepMove(dx, dz, settings_.player.climbSpeed * dt, movementRules_.maxClimbSlope * 1.05f)){
 					wanted = MotionClimb;
 				}
 			}
-			heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
+			heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
 		}
 		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
 		if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
@@ -524,7 +523,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(appliedMotion_ >= 0 && appliedMotion_ != motion_ && !lastPose_.rotations.empty()){
 		fadeFrom_ = lastPose_;
 		fadeTime_ = 0.0f;
-		fadeDuration_ = isAction(motion_) ? kFadeToAction : isAction(appliedMotion_) ? kFadeFromAction : kFadeLocomotion;
+		fadeDuration_ = isAction(motion_) ? settings_.fade.toAction : isAction(appliedMotion_) ? settings_.fade.fromAction : settings_.fade.locomotion;
 	}
 	appliedMotion_ = motion_;
 	if(fadeTime_ < fadeDuration_ && fadeFrom_.rotations.size() == skeleton->boneCount()){
@@ -564,6 +563,7 @@ void GameScene::updateHud(float dt, uint32_t tick)
 		SDL_Log("hud: reloading %s", kHudScript);
 		getResources().reload();
 		hud_->load(kHudScript);
+		reloadSettings();
 	}
 	if(dt > 0.0f){
 		const float instant = 1.0f / dt;
@@ -582,16 +582,27 @@ void GameScene::updateHud(float dt, uint32_t tick)
 	hud_->update(dt, static_cast<float>(tick) * 0.001f);
 }
 
+void GameScene::reloadSettings()
+{
+	SDL_Log("game: reloading settings");
+	settings_ = loadGameSettings();
+	const field::FieldSettings fieldSettings = field::loadFieldSettings();
+	movementRules_ = field::MovementRules::fromTiles(tiles_, fieldSettings.maxSlope, fieldSettings.maxClimbSlope);
+	applyModelHeight(modelHeight_); // カメラの高さ・距離(初期値へ戻る)
+}
+
 void GameScene::applyModelHeight(float height)
 {
 	// モデルのメートルの単位で、背が極端に小さい/大きい(単位が違う・頂点が無い)ときは、基準の高さで
-	modelHeight_ = (height > 0.3f && height < 10.0f) ? height : kReferenceHeight;
-	cameraHeight_ = kCameraHeightRatio * modelHeight_;
-	minEyeHeight_ = kMinEyeHeightRatio * modelHeight_;
-	headTop_ = kHeadTopRatio * modelHeight_;
-	minCameraDistance_ = kMinDistanceRatio * modelHeight_;
-	maxCameraDistance_ = kMaxDistanceRatio * modelHeight_;
-	cameraDistance_ = kDefaultDistanceRatio * modelHeight_;
+	const float reference = settings_.camera.referenceHeight;
+	modelHeight_ = (height > 0.3f && height < 10.0f) ? height : reference;
+	const float scale = modelHeight_ / reference;
+	cameraHeight_ = settings_.camera.height * scale;
+	minEyeHeight_ = settings_.camera.minEyeHeight * scale;
+	headTop_ = settings_.camera.headTop * scale;
+	minCameraDistance_ = settings_.camera.minDistance * scale;
+	maxCameraDistance_ = settings_.camera.maxDistance * scale;
+	cameraDistance_ = settings_.camera.distance * scale;
 	SDL_Log("Player height %.2f m (camera height %.2f, distance %.2f)", modelHeight_, cameraHeight_, cameraDistance_);
 }
 
@@ -610,11 +621,11 @@ void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookA
 		// 地面に潜りそうなとき(u: 0〜1で進む): まず、地面すれすれの低い位置のまま、体のすぐ近く(bodyDistance)まで寄る(前半。見る先は頭のまま)。
 		// 近くへ寄ってから、体に沿った弧を描いて、頭のてっぺんの上まで上がる(後半)。上がるにつれて、見る先は頭から真上へ移り(終盤に大きく)、最後は真上を向く
 		const float u = std::clamp((groundPitch - cameraPitch_) / (groundPitch - kMinPitch), 0.0f, 1.0f);
-		const float approach = std::clamp(u / kApproachFraction, 0.0f, 1.0f); // 寄る進み具合
-		const float rise = std::clamp((u - kApproachFraction) / (1.0f - kApproachFraction), 0.0f, 1.0f); // 上がる進み具合
+		const float approach = std::clamp(u / settings_.camera.approachFraction, 0.0f, 1.0f); // 寄る進み具合
+		const float rise = std::clamp((u - settings_.camera.approachFraction) / (1.0f - settings_.camera.approachFraction), 0.0f, 1.0f); // 上がる進み具合
 		const float theta = rise * 1.5707963f;
 		const float startDistance = std::cos(groundPitch) * cameraDistance_;
-		const float bodyDistance = std::min(kBodyDistanceRatio * modelHeight_, startDistance);
+		const float bodyDistance = std::min(settings_.camera.bodyDistance * modelHeight_ / settings_.camera.referenceHeight, startDistance);
 		const float easedApproach = approach * approach * (3.0f - 2.0f * approach);
 		const float horizontal = (startDistance + (bodyDistance - startDistance) * easedApproach) * std::cos(theta);
 		const float height = playerY_ + minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
@@ -633,14 +644,14 @@ void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookA
 			const float direction[3] = {arm.getX() / armLength, arm.getY() / armLength, arm.getZ() / armLength};
 			float t = 0.0f, hit[3];
 			if(map_.raycast(origin, direction, armLength, t, hit)){
-				wanted = std::clamp((t - minEyeHeight_) / armLength, std::min(kMinCameraArm / armLength, 1.0f), 1.0f);
+				wanted = std::clamp((t - minEyeHeight_) / armLength, std::min(settings_.camera.minArm / armLength, 1.0f), 1.0f);
 			}
 		}
 		if(wanted < cameraArm_){
 			cameraArm_ = wanted;
 		}
 		else{
-			cameraArm_ += (wanted - cameraArm_) * std::min(1.0f, kCameraArmRecover * dt);
+			cameraArm_ += (wanted - cameraArm_) * std::min(1.0f, settings_.camera.armRecover * dt);
 		}
 		eye = head + arm * cameraArm_;
 		const float floorY = map_.heightAt(eye.getX(), eye.getZ()) + minEyeHeight_;
@@ -670,6 +681,12 @@ bool GameScene::onIdle(uint32_t tick)
 	if(autoPause && !paused_ && !autoPauseDone_ && tick >= static_cast<uint32_t>(std::atoi(autoPause)) + startTick_){
 		autoPauseDone_ = true;
 		setPaused(true);
+	}
+	// 動作確認用: VULKAN_AUTORELOAD=ミリ秒 で、その時間後に、F5と同じ読み直しをする
+	static const char *autoReload = SDL_getenv("VULKAN_AUTORELOAD");
+	if(autoReload && !autoReloadDone_ && tick >= static_cast<uint32_t>(std::atoi(autoReload)) + startTick_){
+		autoReloadDone_ = true;
+		reloadHud_ = true;
 	}
 	static const char *autoMouse = SDL_getenv("VULKAN_AUTOMOUSE");
 	if(autoMouse && paused_ && !autoMouseDone_){

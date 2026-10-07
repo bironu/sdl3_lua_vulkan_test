@@ -4,6 +4,7 @@
 #include "geo/AffineMap.h"
 #include "model/Vrma.h"
 #include "scene/Scene.h"
+#include "scene/game/GameSettings.h"
 #include "field/FieldMap.h"
 #include "field/FieldMovement.h"
 #include "scene/common/BlobShadow.h"
@@ -24,7 +25,7 @@ namespace game
 //   W/A/S/D: カメラから見た前/左/後ろ/右へ移動(キャラは進む向きを向く)。壁に当たると、それ以上進めない
 //   ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックで視点の回転
 //   マウス: 視点の回転(三人称視点。マウスはウィンドウに取り込む)、ホイール: カメラの距離。Esc/Start: ポーズ(res/lua/ui/pause.lua。再開・言語・感度・タイトルへ・終了)
-//   HUD(res/lua/ui/hud.lua。FPS・操作説明・ミニマップ): Luaのウィジェットで作る。H: 操作説明、M: ミニマップの表示切替、F5: スクリプトの読み直し
+//   HUD(res/lua/ui/hud.lua。FPS・操作説明・ミニマップ): Luaのウィジェットで作る。H: 操作説明、M: ミニマップの表示切替、F5: スクリプト・調整値(res/lua/data/game_settings.lua)の読み直し
 class GameScene : public Scene
 {
 public:
@@ -44,33 +45,12 @@ public:
 
 private:
 	// フィールド(地面のタイル): 原点の角から、x・z の正の向きへ広がる。縁には壁は無いが、外へは出られない(当たり判定)
-	static constexpr float kPlayerRadius = 0.3f;  // 壁との当たりの半径
-	static constexpr float kWalkSpeed = 1.6f;     // m/秒(歩きのモーションの足運びに合わせた値)
-	static constexpr float kSlowRunSpeed = 3.1f;  // m/秒(Slow Runのモーションの足運びに合わせた値。モーションが進む距離2.29m ÷ 0.73秒)
-	static constexpr float kFastRunSpeed = 5.7f;  // m/秒(Fast Run: 3.02m ÷ 0.53秒)
-	static constexpr float kClimbSpeed = 0.5f;    // 歩いて登れない少し急な坂を、ゆっくり登る速さ(m/秒)。Climbing Slopeのモーションの足運びに合わせてゆっくりめ
-	static constexpr float kClimbEnter = 0.85f;   // 先の勾配が、歩ける上限のこの割合を超えたら、登るモーションにする(境目で歩きと登りが入れ替わって止まらないよう、少し手前から)
-	static constexpr float kRollDistance = 4.5f;  // Stand To Rollで前へ転がる距離(モーションが進む距離。モーションの長さの間に、等速で進む)
-	static constexpr float kRunStick = 0.95f;     // 左スティックをこれ以上傾けると「最大」(走る)
-	static constexpr float kTapTime = 0.25f;      // Aボタンを、これより短く押して離したら単押し(転がる)。これ以上押し続けたら長押し(全力で走る)
-	static constexpr float kTriggerOn = 0.5f;     // L2/R2を押したとみなすトリガーの値
-	static constexpr float kTurnSpeed = 12.0f;    // キャラが進む向きへ向く速さ(ラジアン/秒の目安)
-	// カメラの高さ・距離は、モデルの背の高さ(頂点の最大のY。applyModelHeight)に比例する。下は、背の高さ1.6mのモデルを基準にした比率
-	static constexpr float kReferenceHeight = 1.6f;
-	static constexpr float kCameraHeightRatio = 1.35f / kReferenceHeight;   // 注視点(プレイヤーの頭のあたり)の高さ
-	static constexpr float kMinEyeHeightRatio = 0.3f / kReferenceHeight;    // カメラの、地面からの最低の高さ。これより下へ行きそうなら、体に沿って頭の上へ回る
-	static constexpr float kHeadTopRatio = 1.9f / kReferenceHeight;         // 体に沿って上がったカメラが、最後に着く高さ(頭のてっぺんの上)
-	static constexpr float kDefaultDistanceRatio = 3.5f / kReferenceHeight; // カメラの距離の初期値
-	static constexpr float kMinCameraArm = 0.5f;      // 地形に遮られたときの、頭からカメラまでの最短の距離(m)
-	static constexpr float kCameraArmRecover = 5.0f;  // 遮りが無くなったときに、元の距離へ戻る速さ(1/秒。大きいほど速い)
-	static constexpr float kBodyDistanceRatio = 0.7f / kReferenceHeight; // 真上へ向けるとき、カメラが体に沿って上がる、体の中心からの水平の距離
-	static constexpr float kApproachFraction = 0.35f; // 真上へ向ける動きのうち、体の近くへ寄る(低いまま近づく)のに使う割合。残りで体に沿って上がる
+	// 調整値(速さ・カメラ・クロスフェードなど)は settings_(res/lua/data/game_settings.lua。F5で読み直す)。カメラの高さ・距離は、モデルの背の高さ(頂点の最大のY。applyModelHeight)に比例する
 	static constexpr float kMinPitch = -1.5707963f; // 真上を向く
-	static constexpr float kMinDistanceRatio = 0.75f;
-	static constexpr float kMaxDistanceRatio = 5.0f;
 
 	// カメラの位置・注視点・上向きを、yaw/pitch/distanceから求める。地面に潜りそうなときは、体に沿って頭の上へ上がり、真上を向く(ダークソウル風)
 	void applyModelHeight(float height); // プレイヤーのモデルの背の高さから、カメラの高さ・距離を決める(距離は初期値)
+	void reloadSettings();               // 調整値(game_settings.lua)と、地形の設定(field_settings.lua)を読み直す(F5)
 	// 地形(丘・坂)にめり込みそうなときは、頭からカメラへの線が地面に当たる手前まで、カメラを引き寄せる(dtは、離れていくときのなめらかさに使う)
 	void computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up);
 	float fieldWidth() const { return map_.width() * map_.cellSize(); }
@@ -93,9 +73,6 @@ private:
 	bool stepMove(float dirX, float dirZ, float distance, float maxSlope = -1.0f);
 	std::unique_ptr<model::VrmaPlayer> motions_[MotionCount];
 	// クロスフェード: モーションが切り替わったら、切り替わる直前の姿勢から、新しいモーションの姿勢へ、短い時間でなめらかに混ぜる
-	static constexpr float kFadeToAction = 0.10f;   // アクションを始めるとき(反応を遅らせないよう短く)
-	static constexpr float kFadeFromAction = 0.30f; // アクションが終わって、立ち・歩き・走りへ戻るとき
-	static constexpr float kFadeLocomotion = 0.20f; // 立ち・歩き・走りの間
 	struct Pose
 	{
 		std::vector<model::Quat> rotations;
@@ -123,14 +100,15 @@ private:
 	float cameraYaw_ = 0.0f;   // 注視点から見たカメラの水平角(0でプレイヤーの+Z側=キャラの正面側)
 	float cameraPitch_ = 0.25f;
 	float cameraArm_ = 1.0f; // 地形に遮られていないときを1とした、頭からカメラまでの距離の割合(遮られたら縮め、遮りが無くなったらなめらかに戻す)
-	float cameraDistance_ = kDefaultDistanceRatio * kReferenceHeight;
+	GameSettings settings_;
+	float cameraDistance_ = 3.5f;
 	// モデルの背の高さから決まる、カメラの高さ・距離(applyModelHeight)
-	float modelHeight_ = kReferenceHeight;
-	float cameraHeight_ = kCameraHeightRatio * kReferenceHeight;
-	float minEyeHeight_ = kMinEyeHeightRatio * kReferenceHeight;
-	float headTop_ = kHeadTopRatio * kReferenceHeight;
-	float minCameraDistance_ = kMinDistanceRatio * kReferenceHeight;
-	float maxCameraDistance_ = kMaxDistanceRatio * kReferenceHeight;
+	float modelHeight_ = 1.6f;
+	float cameraHeight_ = 1.35f;
+	float minEyeHeight_ = 0.3f;
+	float headTop_ = 1.9f;
+	float minCameraDistance_ = 1.2f;
+	float maxCameraDistance_ = 8.0f;
 
 	// 地面
 	std::vector<field::TileDef> tiles_;
@@ -152,7 +130,7 @@ private:
 	std::unique_ptr<ui::UiScript> pauseMenu_;
 	ui::PadNavigator padNavigator_;
 	bool paused_ = false;
-	bool autoPauseDone_ = false, autoMouseDone_ = false; // 動作確認用の環境変数(VULKAN_AUTOPAUSE/AUTOMOUSE)の、実行済み
+	bool autoPauseDone_ = false, autoMouseDone_ = false, autoReloadDone_ = false; // 動作確認用の環境変数(VULKAN_AUTOPAUSE/AUTOMOUSE)の、実行済み
 	uint32_t startTick_ = 0;
 	float sensitivity_ = 1.0f; // 視点の回転の感度の倍率(ポーズ画面のオプション)
 };
