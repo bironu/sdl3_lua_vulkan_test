@@ -45,10 +45,10 @@ find_program(GLSLC glslc REQUIRED)
 set(SHADER_SOURCES triangle.vert triangle.frag sprite.vert sprite.frag shadow.vert triangle_pre.vert shadow_pre.vert outline.vert outline.frag outline_opaque.frag outline_pre.vert post.vert post.frag skin.comp)
 set(SHADER_SPVS)
 foreach(shader ${SHADER_SOURCES})
-  set(spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.spv)
+  set(spv ${APP_DIST_DIR}/shaders/${shader}.spv)
   add_custom_command(
     OUTPUT ${spv}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_DIST_DIR}/shaders
     COMMAND ${GLSLC} ${PROJECT_SOURCE_DIR}/res/shaders/${shader} -o ${spv}
     DEPENDS ${PROJECT_SOURCE_DIR}/res/shaders/${shader}
     COMMENT "glslc ${shader}"
@@ -56,20 +56,20 @@ foreach(shader ${SHADER_SOURCES})
   list(APPEND SHADER_SPVS ${spv})
 endforeach()
 # 同じ triangle.frag を -DOPAQUE_PASS でコンパイルした、不透明の材質用の版(discardなし)
-set(opaque_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle_opaque.frag.spv)
+set(opaque_spv ${APP_DIST_DIR}/shaders/triangle_opaque.frag.spv)
 add_custom_command(
   OUTPUT ${opaque_spv}
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_DIST_DIR}/shaders
   COMMAND ${GLSLC} -DOPAQUE_PASS ${PROJECT_SOURCE_DIR}/res/shaders/triangle.frag -o ${opaque_spv}
   DEPENDS ${PROJECT_SOURCE_DIR}/res/shaders/triangle.frag
   COMMENT "glslc triangle.frag (OPAQUE_PASS)"
   VERBATIM)
 list(APPEND SHADER_SPVS ${opaque_spv})
 # アルファの切り抜き(MASK)の材質用の版(-DMASK_PASS)
-set(mask_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/triangle_mask.frag.spv)
+set(mask_spv ${APP_DIST_DIR}/shaders/triangle_mask.frag.spv)
 add_custom_command(
   OUTPUT ${mask_spv}
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_DIST_DIR}/shaders
   COMMAND ${GLSLC} -DMASK_PASS ${PROJECT_SOURCE_DIR}/res/shaders/triangle.frag -o ${mask_spv}
   DEPENDS ${PROJECT_SOURCE_DIR}/res/shaders/triangle.frag
   COMMENT "glslc triangle.frag (MASK_PASS)"
@@ -79,4 +79,14 @@ add_custom_target(shaders DEPENDS ${SHADER_SPVS})
 add_dependencies(app_main shaders)
 
 # 実行時のデータ(res/: 画像・フォント・音・lua・model・motion)は、実行ファイルの横のres/を先に探し(配布時はinstallでコピーする)、
-# 無ければビルド元のリポジトリのres/を使う(ResourcePaths::resource。APP_RESOURCE_ROOTは最上位のCMakeLists.txtで設定)。開発中はシンボリックリンクもコピーも不要
+# 無ければビルド元のリポジトリのres/を使う(ResourcePaths::resource。APP_DEV_RESOURCE_ROOTがONのときだけ。最上位のCMakeLists.txtで設定)。開発中はシンボリックリンクもコピーも不要
+
+# インストール(cmake --install build --prefix <出力先>): 配布する並びは、実行ファイルと同じ場所に shaders/ と res/ を置く
+#   <prefix>/sdl3_lua5_vulkan  <prefix>/shaders/*.spv  <prefix>/res/...
+# (macOSの.appにするときは、実行ファイルをContents/MacOS、shaders/とres/をContents/Resourcesへ。SDL_GetBasePathがResourcesを返すので、探し方はそのまま)
+# フィールドエディタ・変換ツールは開発用なので、インストールしない。res/shaders/ の GLSL(ソース)も、実行時には要らないので除く
+install(TARGETS app_main RUNTIME DESTINATION .)
+install(FILES ${SHADER_SPVS} DESTINATION shaders)
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/res/ DESTINATION res
+  PATTERN ".DS_Store" EXCLUDE
+  PATTERN "shaders" EXCLUDE)

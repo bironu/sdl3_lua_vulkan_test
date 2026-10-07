@@ -1,5 +1,6 @@
-# ビルド成果物(cmake -S . -B build)
+# ビルド成果物(cmake -S . -B build)。実行ファイルと shaders/ は dist/ に出る
 /build/
+/dist/
 
 # macOS
 .DS_Store
