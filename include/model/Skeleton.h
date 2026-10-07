@@ -52,6 +52,10 @@ public:
 	// ボーンのアニメーション。回転は親ボーンから見た局所の回転、移動は休止ポーズからのずれ
 	void setBoneRotation(int bone, const Quat &rotation);
 	void setBoneTranslation(int bone, const Vec3 &translation);
+	// いま設定されているボーンのアニメーション(setBoneRotation/setBoneTranslationで入れたもの。resetPose()後は休止ポーズ=回転なし・移動なし)。
+	// 2つのモーションの姿勢を混ぜる(クロスフェード)ときに読む
+	const Quat &boneRotation(int bone) const { return state_[bone].animRotation; }
+	const Vec3 &boneTranslation(int bone) const { return state_[bone].animTranslation; }
 	// IKを有効/無効にする(既定は有効)。全体と、IKボーンごと(VMDのIKオン/オフ区間用)
 	void setIkEnabled(bool enabled) { ikEnabled_ = enabled; }
 	void setIkEnabled(int ikBone, bool enabled);

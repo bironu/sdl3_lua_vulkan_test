@@ -83,6 +83,20 @@ private:
 	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
 	void stepMove(float dirX, float dirZ, float distance);
 	std::unique_ptr<model::VrmaPlayer> motions_[MotionCount];
+	// クロスフェード: モーションが切り替わったら、切り替わる直前の姿勢から、新しいモーションの姿勢へ、短い時間でなめらかに混ぜる
+	static constexpr float kFadeToAction = 0.10f;   // アクションを始めるとき(反応を遅らせないよう短く)
+	static constexpr float kFadeFromAction = 0.30f; // アクションが終わって、立ち・歩き・走りへ戻るとき
+	static constexpr float kFadeLocomotion = 0.20f; // 立ち・歩き・走りの間
+	struct Pose
+	{
+		std::vector<model::Quat> rotations;
+		std::vector<model::Vec3> translations;
+	};
+	static void capturePose(const model::Skeleton &skeleton, Pose &pose);
+	Pose lastPose_;          // 前のフレームの姿勢(混ぜる元)
+	Pose fadeFrom_;          // フェード開始時の姿勢
+	int appliedMotion_ = -1; // 前のフレームに当てたモーション
+	float fadeTime_ = 0.0f, fadeDuration_ = 0.0f; // fadeTime_ < fadeDuration_ の間、フェード中
 	int motion_ = MotionIdle;
 	float motionTime_ = 0.0f;
 	bool actionHeld_ = false;    // Aボタン(キーボードはSpace)が押されている

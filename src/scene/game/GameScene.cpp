@@ -284,6 +284,16 @@ void GameScene::onDestroy(uint32_t tick)
 	Scene::onDestroy(tick);
 }
 
+void GameScene::capturePose(const model::Skeleton &skeleton, Pose &pose)
+{
+	pose.rotations.resize(skeleton.boneCount());
+	pose.translations.resize(skeleton.boneCount());
+	for(size_t i = 0; i < skeleton.boneCount(); ++i){
+		pose.rotations[i] = skeleton.boneRotation(static_cast<int>(i));
+		pose.translations[i] = skeleton.boneTranslation(static_cast<int>(i));
+	}
+}
+
 void GameScene::stepMove(float dirX, float dirZ, float distance)
 {
 	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
@@ -478,6 +488,28 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		}
 		player->apply(*skeleton, morphs, std::min(motionTime_, player->duration()));
 	}
+	// クロスフェード: モーションが切り替わった瞬間に、直前の姿勢を覚えて、新しい姿勢へ混ぜていく
+	if(appliedMotion_ >= 0 && appliedMotion_ != motion_ && !lastPose_.rotations.empty()){
+		fadeFrom_ = lastPose_;
+		fadeTime_ = 0.0f;
+		fadeDuration_ = isAction(motion_) ? kFadeToAction : isAction(appliedMotion_) ? kFadeFromAction : kFadeLocomotion;
+	}
+	appliedMotion_ = motion_;
+	if(fadeTime_ < fadeDuration_ && fadeFrom_.rotations.size() == skeleton->boneCount()){
+		fadeTime_ += dt;
+		const float t = std::clamp(fadeTime_ / fadeDuration_, 0.0f, 1.0f);
+		const float alpha = t * t * (3.0f - 2.0f * t); // なめらかに始まり、なめらかに終わる
+		for(size_t i = 0; i < skeleton->boneCount(); ++i){
+			const int bone = static_cast<int>(i);
+			const model::Quat &toRotation = skeleton->boneRotation(bone);
+			const model::Vec3 &toTranslation = skeleton->boneTranslation(bone);
+			const model::Vec3 &fromTranslation = fadeFrom_.translations[i];
+			skeleton->setBoneRotation(bone, model::Quat::slerp(fadeFrom_.rotations[i], toRotation, alpha));
+			skeleton->setBoneTranslation(bone, {fromTranslation.x + (toTranslation.x - fromTranslation.x) * alpha,
+				fromTranslation.y + (toTranslation.y - fromTranslation.y) * alpha, fromTranslation.z + (toTranslation.z - fromTranslation.z) * alpha});
+		}
+	}
+	capturePose(*skeleton, lastPose_);
 	player_->updatePose(dt);
 }
 
