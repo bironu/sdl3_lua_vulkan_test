@@ -607,15 +607,19 @@ void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookA
 		lookAt = head;
 	}
 	else{
-		// 地面に潜りそうなとき: 地面すれすれの位置から、体に沿った(外へふくらんだ)弧を描いて、頭のてっぺんの上まで上がる。
-		// 進むほど(u: 0〜1)、見る先は頭から真上へ移り(終盤に大きく)、最後は真上を向く
+		// 地面に潜りそうなとき(u: 0〜1で進む): まず、地面すれすれの低い位置のまま、体のすぐ近く(bodyDistance)まで寄る(前半。見る先は頭のまま)。
+		// 近くへ寄ってから、体に沿った弧を描いて、頭のてっぺんの上まで上がる(後半)。上がるにつれて、見る先は頭から真上へ移り(終盤に大きく)、最後は真上を向く
 		const float u = std::clamp((groundPitch - cameraPitch_) / (groundPitch - kMinPitch), 0.0f, 1.0f);
-		const float theta = u * 1.5707963f;
+		const float approach = std::clamp(u / kApproachFraction, 0.0f, 1.0f); // 寄る進み具合
+		const float rise = std::clamp((u - kApproachFraction) / (1.0f - kApproachFraction), 0.0f, 1.0f); // 上がる進み具合
+		const float theta = rise * 1.5707963f;
 		const float startDistance = std::cos(groundPitch) * cameraDistance_;
-		const float horizontal = startDistance * std::cos(theta);
+		const float bodyDistance = std::min(kBodyDistanceRatio * modelHeight_, startDistance);
+		const float easedApproach = approach * approach * (3.0f - 2.0f * approach);
+		const float horizontal = (startDistance + (bodyDistance - startDistance) * easedApproach) * std::cos(theta);
 		const float height = playerY_ + minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
 		eye = geo::Vector3f(playerX_ + sinYaw * horizontal, height, playerZ_ + cosYaw * horizontal);
-		const float look = u * u; // 見る先が頭から離れるのは終盤から(途中までは、体が視界に残る)
+		const float look = rise * rise; // 見る先が頭から離れるのは、上がる後半の終盤から(それまでは、体が視界に残る)
 		lookAt = head + (eye + geo::Vector3f(0.0f, 4.0f, 0.0f) - head) * look;
 	}
 	// 地形: 頭からカメラへの線が地面(丘・坂)に当たるなら、当たる手前まで引き寄せる。縮むときはすぐ、戻るときはなめらかに(カメラが震えないよう)。

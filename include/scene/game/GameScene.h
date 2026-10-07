@@ -63,6 +63,8 @@ private:
 	static constexpr float kDefaultDistanceRatio = 3.5f / kReferenceHeight; // カメラの距離の初期値
 	static constexpr float kMinCameraArm = 0.5f;      // 地形に遮られたときの、頭からカメラまでの最短の距離(m)
 	static constexpr float kCameraArmRecover = 5.0f;  // 遮りが無くなったときに、元の距離へ戻る速さ(1/秒。大きいほど速い)
+	static constexpr float kBodyDistanceRatio = 0.7f / kReferenceHeight; // 真上へ向けるとき、カメラが体に沿って上がる、体の中心からの水平の距離
+	static constexpr float kApproachFraction = 0.35f; // 真上へ向ける動きのうち、体の近くへ寄る(低いまま近づく)のに使う割合。残りで体に沿って上がる
 	static constexpr float kMinPitch = -1.5707963f; // 真上を向く
 	static constexpr float kMinDistanceRatio = 0.75f;
 	static constexpr float kMaxDistanceRatio = 5.0f;
