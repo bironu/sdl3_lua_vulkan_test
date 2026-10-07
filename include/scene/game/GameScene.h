@@ -61,13 +61,16 @@ private:
 	static constexpr float kMinEyeHeightRatio = 0.3f / kReferenceHeight;    // カメラの、地面からの最低の高さ。これより下へ行きそうなら、体に沿って頭の上へ回る
 	static constexpr float kHeadTopRatio = 1.9f / kReferenceHeight;         // 体に沿って上がったカメラが、最後に着く高さ(頭のてっぺんの上)
 	static constexpr float kDefaultDistanceRatio = 3.5f / kReferenceHeight; // カメラの距離の初期値
+	static constexpr float kMinCameraArm = 0.5f;      // 地形に遮られたときの、頭からカメラまでの最短の距離(m)
+	static constexpr float kCameraArmRecover = 5.0f;  // 遮りが無くなったときに、元の距離へ戻る速さ(1/秒。大きいほど速い)
 	static constexpr float kMinPitch = -1.5707963f; // 真上を向く
 	static constexpr float kMinDistanceRatio = 0.75f;
 	static constexpr float kMaxDistanceRatio = 5.0f;
 
 	// カメラの位置・注視点・上向きを、yaw/pitch/distanceから求める。地面に潜りそうなときは、体に沿って頭の上へ上がり、真上を向く(ダークソウル風)
 	void applyModelHeight(float height); // プレイヤーのモデルの背の高さから、カメラの高さ・距離を決める(距離は初期値)
-	void computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up) const;
+	// 地形(丘・坂)にめり込みそうなときは、頭からカメラへの線が地面に当たる手前まで、カメラを引き寄せる(dtは、離れていくときのなめらかさに使う)
+	void computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up);
 	float fieldWidth() const { return map_.width() * map_.cellSize(); }
 	float fieldDepth() const { return map_.depth() * map_.cellSize(); }
 	void updatePlayer(float dt, uint32_t tick);
@@ -117,6 +120,7 @@ private:
 
 	float cameraYaw_ = 0.0f;   // 注視点から見たカメラの水平角(0でプレイヤーの+Z側=キャラの正面側)
 	float cameraPitch_ = 0.25f;
+	float cameraArm_ = 1.0f; // 地形に遮られていないときを1とした、頭からカメラまでの距離の割合(遮られたら縮め、遮りが無くなったらなめらかに戻す)
 	float cameraDistance_ = kDefaultDistanceRatio * kReferenceHeight;
 	// モデルの背の高さから決まる、カメラの高さ・距離(applyModelHeight)
 	float modelHeight_ = kReferenceHeight;

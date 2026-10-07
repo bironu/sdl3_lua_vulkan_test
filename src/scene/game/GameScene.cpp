@@ -595,7 +595,7 @@ void GameScene::applyModelHeight(float height)
 	SDL_Log("Player height %.2f m (camera height %.2f, distance %.2f)", modelHeight_, cameraHeight_, cameraDistance_);
 }
 
-void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up) const
+void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up)
 {
 	const float sinYaw = std::sin(cameraYaw_), cosYaw = std::cos(cameraYaw_);
 	const geo::Vector3f head(playerX_, playerY_ + cameraHeight_, playerZ_);
@@ -617,6 +617,32 @@ void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Ve
 		eye = geo::Vector3f(playerX_ + sinYaw * horizontal, height, playerZ_ + cosYaw * horizontal);
 		const float look = u * u; // 見る先が頭から離れるのは終盤から(途中までは、体が視界に残る)
 		lookAt = head + (eye + geo::Vector3f(0.0f, 4.0f, 0.0f) - head) * look;
+	}
+	// 地形: 頭からカメラへの線が地面(丘・坂)に当たるなら、当たる手前まで引き寄せる。縮むときはすぐ、戻るときはなめらかに(カメラが震えないよう)。
+	// 引き寄せたあとも、カメラの下の地面から minEyeHeight_ 以上は高くする
+	{
+		const geo::Vector3f arm = eye - head;
+		const float armLength = std::sqrt(arm.getX() * arm.getX() + arm.getY() * arm.getY() + arm.getZ() * arm.getZ());
+		float wanted = 1.0f;
+		if(armLength > 1e-4f){
+			const float origin[3] = {head.getX(), head.getY(), head.getZ()};
+			const float direction[3] = {arm.getX() / armLength, arm.getY() / armLength, arm.getZ() / armLength};
+			float t = 0.0f, hit[3];
+			if(map_.raycast(origin, direction, armLength, t, hit)){
+				wanted = std::clamp((t - minEyeHeight_) / armLength, std::min(kMinCameraArm / armLength, 1.0f), 1.0f);
+			}
+		}
+		if(wanted < cameraArm_){
+			cameraArm_ = wanted;
+		}
+		else{
+			cameraArm_ += (wanted - cameraArm_) * std::min(1.0f, kCameraArmRecover * dt);
+		}
+		eye = head + arm * cameraArm_;
+		const float floorY = map_.heightAt(eye.getX(), eye.getZ()) + minEyeHeight_;
+		if(eye.getY() < floorY){
+			eye = geo::Vector3f(eye.getX(), floorY, eye.getZ());
+		}
 	}
 	// 上向き: 見ている向きの仰角から。真上を見ても、(正面の逆の向きが画面の上になるよう)つぶれない
 	const geo::Vector3f forward = geo::Vector3f::normalize(lookAt - eye);
@@ -660,7 +686,7 @@ bool GameScene::onIdle(uint32_t tick)
 
 	// 三人称のカメラ
 	geo::Vector3f eye, lookAt, up;
-	computeCamera(eye, lookAt, up);
+	computeCamera(dt, eye, lookAt, up);
 	const auto view = geo::createLookAt<float>(eye, lookAt, up);
 	const auto proj = vk_::createPerspective(kPi / 3.0f, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 200.0f);
 	window.setCameraPosition(eye);
