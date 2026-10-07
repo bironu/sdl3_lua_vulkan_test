@@ -1,0 +1,86 @@
+#version 450
+
+// スキニング(+頂点モーフ)をコンピュートで1回だけ行い、結果を通常の頂点(vk_::Vertex)として書き出す。
+// 影・本体・輪郭線の各パスは、この結果を普通の頂点バッファとして読む(同じスキニングを何度も計算しない)。
+// 入力: モデルの全部品の休止ポーズの頂点を並べたもの(部品の数や大きさによらず、1回のdispatchで全部を処理する)。1頂点(vk_::SkinnedVertex: float 20個 = base(位置3,色3,uv2,法線3) + ボーン番号4(int) + 重み4 + 元の頂点番号(int))。
+// 位置・法線はモデルの元の座標系(PMX: 左手系)のままで、ボーン行列で動かしてからZを反転して右手系に直す(旧triangle_skin.vertと同じ)
+layout(local_size_x = 64) in;
+
+// set 0: モデルのフレーム枠ごとのバッファ(VulkanBonePool)。0=ボーンごとの姿勢(vec4が3つ)、1=頂点モーフの移動量(頂点ごとにvec4が2つ)
+layout(std430, set = 0, binding = 0) readonly buffer Bones {
+	vec4 rows[];
+} bones;
+layout(std430, set = 0, binding = 1) readonly buffer Morph {
+	vec4 data[];
+} morph;
+
+// set 1: 部品(材質ごとのメッシュ)ごと。入力の頂点と、出力の頂点(vk_::Vertex: float 11個 = 位置3,色3,uv2,法線3)
+layout(std430, set = 1, binding = 0) readonly buffer In {
+	float v[];
+} src;
+layout(std430, set = 1, binding = 1) writeonly buffer Out {
+	float v[];
+} dst;
+
+layout(push_constant) uniform Push {
+	uint count;
+} pc;
+
+void main()
+{
+	// ワークグループ数が1次元の上限を超えるときは2次元に折り返してdispatchされる(VulkanWindow::swap())。番号を1次元に戻す
+	uint i = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 64u) + gl_GlobalInvocationID.x;
+	if(i >= pc.count){
+		return;
+	}
+	uint s = i * 20u;
+	uint d = i * 11u;
+	vec3 position = vec3(src.v[s], src.v[s + 1u], src.v[s + 2u]);
+	vec3 color = vec3(src.v[s + 3u], src.v[s + 4u], src.v[s + 5u]);
+	vec2 uv = vec2(src.v[s + 6u], src.v[s + 7u]);
+	vec3 normal = vec3(src.v[s + 8u], src.v[s + 9u], src.v[s + 10u]);
+	ivec4 boneIds = ivec4(floatBitsToInt(src.v[s + 11u]), floatBitsToInt(src.v[s + 12u]), floatBitsToInt(src.v[s + 13u]), floatBitsToInt(src.v[s + 14u]));
+	vec4 weights = vec4(src.v[s + 15u], src.v[s + 16u], src.v[s + 17u], src.v[s + 18u]);
+	int source = floatBitsToInt(src.v[s + 19u]);
+
+	if(source >= 0){ // 頂点モーフ: 位置とUVの移動量(スキニングの前に足す)
+		position += morph.data[source * 2].xyz;
+		uv += morph.data[source * 2 + 1].xy;
+	}
+	vec3 skinnedPosition = vec3(0.0);
+	vec3 skinnedNormal = vec3(0.0);
+	float total = 0.0;
+	for(int k = 0; k < 4; ++k){
+		float w = weights[k];
+		int b = boneIds[k];
+		if(w <= 0.0 || b < 0){
+			continue;
+		}
+		vec4 r0 = bones.rows[b * 3];
+		vec4 r1 = bones.rows[b * 3 + 1];
+		vec4 r2 = bones.rows[b * 3 + 2];
+		vec4 p = vec4(position, 1.0);
+		skinnedPosition += w * vec3(dot(r0, p), dot(r1, p), dot(r2, p));
+		skinnedNormal += w * vec3(dot(r0.xyz, normal), dot(r1.xyz, normal), dot(r2.xyz, normal));
+		total += w;
+	}
+	if(total <= 0.0){ // ウェイトが無い頂点は動かさない
+		skinnedPosition = position;
+		skinnedNormal = normal;
+	}
+	// 左手系→右手系: Zを反転
+	vec3 outPosition = vec3(skinnedPosition.xy, -skinnedPosition.z);
+	vec3 outNormal = normalize(vec3(skinnedNormal.xy, -skinnedNormal.z));
+
+	dst.v[d] = outPosition.x;
+	dst.v[d + 1u] = outPosition.y;
+	dst.v[d + 2u] = outPosition.z;
+	dst.v[d + 3u] = color.x;
+	dst.v[d + 4u] = color.y;
+	dst.v[d + 5u] = color.z;
+	dst.v[d + 6u] = uv.x;
+	dst.v[d + 7u] = uv.y;
+	dst.v[d + 8u] = outNormal.x;
+	dst.v[d + 9u] = outNormal.y;
+	dst.v[d + 10u] = outNormal.z;
+}
