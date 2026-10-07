@@ -189,6 +189,12 @@ void GameScene::onCreate(uint32_t tick)
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to load the field: %s (using a flat default)", settings.field.c_str());
 	}
 	fieldRenderer_ = std::make_unique<FieldRenderer>(window, map_, tiles_);
+	propRenderer_ = std::make_unique<PropRenderer>(window, resources());
+	for(const auto &prop : map_.props()){
+		propRenderer_->preload(map_.propName(prop.prop)); // 置物のモデルは、最初の描画ではなく、ここで読む
+	}
+	movementRules_ = field::MovementRules::fromTiles(tiles_, settings.maxSlope);
+	propCollision_.build(map_, [this](const std::string &name){ return propRenderer_->footprint(name); });
 	playerX_ = fieldWidth() * 0.5f; // フィールドの真ん中から始める
 	playerZ_ = fieldDepth() * 0.5f;
 
@@ -231,7 +237,8 @@ void GameScene::onCreate(uint32_t tick)
 			}
 		}
 	}
-	playerTransform_.setPos(geo::Vector3f(playerX_, 0.0f, playerZ_));
+	playerY_ = map_.heightAt(playerX_, playerZ_);
+	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
 	playerTransform_.setScale(geo::Vector3f(1.0f, 1.0f, 1.0f));
 
 	// HUD: Luaのウィジェット。スクリプトの読み込み一覧(hud.assets.lua)があれば、先に読む
@@ -302,11 +309,25 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		dx /= length;
 		dz /= length;
 		// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
-		playerX_ = std::clamp(playerX_ + dx * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldWidth() - kPlayerRadius);
-		playerZ_ = std::clamp(playerZ_ + dz * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldDepth() - kPlayerRadius);
+		const float targetX = std::clamp(playerX_ + dx * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldWidth() - kPlayerRadius);
+		const float targetZ = std::clamp(playerZ_ + dz * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldDepth() - kPlayerRadius);
+		// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
+		field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ);
+		// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
+		float pushedX = playerX_, pushedZ = playerZ_;
+		if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
+			pushedX = std::clamp(pushedX, kPlayerRadius, fieldWidth() - kPlayerRadius);
+			pushedZ = std::clamp(pushedZ, kPlayerRadius, fieldDepth() - kPlayerRadius);
+			float checkX = playerX_, checkZ = playerZ_;
+			if(field::moveOnField(map_, movementRules_, kPlayerRadius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
+				playerX_ = pushedX;
+				playerZ_ = pushedZ;
+			}
+		}
 		heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
 	}
-	playerTransform_.setPos(geo::Vector3f(playerX_, 0.0f, playerZ_));
+	playerY_ = map_.heightAt(playerX_, playerZ_);
+	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
 	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)));
 
 	// モーション
@@ -335,9 +356,10 @@ void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
 {
 	auto &window = vulkanWindow(*this);
 	fieldRenderer_->draw(window, viewProj);
+	propRenderer_->draw(map_, viewProj);
 	// プレイヤーと、足元の丸い影
 	window.draw(player_, viewProj, playerTransform_.getMatrix());
-	blob_->draw(window, viewProj, playerX_, 0.0f, playerZ_, 0.5f, 0.55f);
+	blob_->draw(window, viewProj, playerX_, playerY_, playerZ_, 0.5f, 0.55f);
 }
 
 // HUDへ、ゲームの状態を渡して、スクリプトのupdateを進める(描画はdrawHudで)
@@ -383,7 +405,7 @@ void GameScene::applyModelHeight(float height)
 void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up) const
 {
 	const float sinYaw = std::sin(cameraYaw_), cosYaw = std::cos(cameraYaw_);
-	const geo::Vector3f head(playerX_, cameraHeight_, playerZ_);
+	const geo::Vector3f head(playerX_, playerY_ + cameraHeight_, playerZ_);
 	// 目の高さが minEyeHeight_ になる角度(これより下を向こうとすると、地面に潜る)
 	const float groundPitch = std::asin(std::clamp((minEyeHeight_ - cameraHeight_) / cameraDistance_, -1.0f, 1.0f));
 	if(cameraPitch_ >= groundPitch){
@@ -398,7 +420,7 @@ void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Ve
 		const float theta = u * 1.5707963f;
 		const float startDistance = std::cos(groundPitch) * cameraDistance_;
 		const float horizontal = startDistance * std::cos(theta);
-		const float height = minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
+		const float height = playerY_ + minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
 		eye = geo::Vector3f(playerX_ + sinYaw * horizontal, height, playerZ_ + cosYaw * horizontal);
 		const float look = u * u; // 見る先が頭から離れるのは終盤から(途中までは、体が視界に残る)
 		lookAt = head + (eye + geo::Vector3f(0.0f, 4.0f, 0.0f) - head) * look;

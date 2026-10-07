@@ -5,8 +5,10 @@
 #include "model/Vrma.h"
 #include "scene/Scene.h"
 #include "field/FieldMap.h"
+#include "field/FieldMovement.h"
 #include "scene/common/BlobShadow.h"
 #include "scene/common/FieldRenderer.h"
+#include "scene/common/PropRenderer.h"
 #include "vk/VulkanMaterial.h"
 #include "vk/VulkanMesh.h"
 #include "vk/VulkanModel.h"
@@ -91,6 +93,10 @@ private:
 	std::vector<field::TileDef> tiles_;
 	field::FieldMap map_;
 	std::unique_ptr<FieldRenderer> fieldRenderer_;
+	std::unique_ptr<PropRenderer> propRenderer_; // 置物(フィールドのファイルが持つ)
+	field::MovementRules movementRules_;         // 歩けないタイル・勾配の上限
+	field::PropCollision propCollision_;         // 置物の足元の当たり
+	float playerY_ = 0.0f; // プレイヤーの足元の高さ(地面の高さ)
 	std::unique_ptr<BlobShadow> blob_;
 	uint32_t lastTick_ = 0;
 

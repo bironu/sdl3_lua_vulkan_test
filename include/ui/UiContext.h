@@ -37,6 +37,7 @@ struct WorldView
 	float fps = 0.0f;
 	float sensitivity = 1.0f; // 視点の回転の感度の倍率(ポーズ画面のオプション)
 	std::vector<Marker> markers; // ミニマップに出す点(敵など。プレイヤーは含まない)
+	std::map<std::string, std::string> strings; // 文字列の値(Luaの world.strings.名前 で読める。エディタの置物の名前など)
 	std::map<std::string, float> values; // その他の、シーンごとの数値(Luaの world.名前 で読める。エディタの選択中のタイルなど)
 };
 

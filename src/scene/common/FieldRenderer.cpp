@@ -3,54 +3,113 @@
 #include "sdl/SDLImage.h"
 #include "sdl/SDLVulkanWindow.h"
 #include "vk/Vertex.h"
+#include <algorithm>
 
 namespace game
 {
 
 FieldRenderer::FieldRenderer(SDL_::VulkanWindow &window, const field::FieldMap &map, const std::vector<field::TileDef> &tiles)
+	: window_(window)
+	, tiles_(tiles)
+{
+	for(const auto &tile : tiles_){
+		auto image = std::make_shared<SDL_::Image>(1, 1);
+		image->fillRect(SDL_::Color(tile.r, tile.g, tile.b, 255));
+		VulkanMaterial material;
+		material.texture = window.createTexture(image);
+		material.specular = 0.0f;
+		material.castShadow = false;
+		material.receiveShadow = false;
+		materials_.push_back(material);
+	}
+	chunksX_ = (map.width() + kChunkSize - 1) / kChunkSize;
+	chunksZ_ = (map.depth() + kChunkSize - 1) / kChunkSize;
+	meshes_.assign(static_cast<size_t>(chunksX_) * chunksZ_, std::vector<std::shared_ptr<VulkanMesh>>(tiles_.size()));
+	dirty_.assign(meshes_.size(), true);
+	update(map);
+}
+
+void FieldRenderer::invalidate(int x0, int z0, int x1, int z1)
+{
+	// 頂点の法線は隣のマスの高さまで使うので、1マス広げる
+	const int cx0 = std::max(x0 - 1, 0) / kChunkSize, cz0 = std::max(z0 - 1, 0) / kChunkSize;
+	const int cx1 = std::min((x1 + 1) / kChunkSize, chunksX_ - 1), cz1 = std::min((z1 + 1) / kChunkSize, chunksZ_ - 1);
+	for(int cz = cz0; cz <= cz1; ++cz){
+		for(int cx = cx0; cx <= cx1; ++cx){
+			dirty_[static_cast<size_t>(cz) * chunksX_ + cx] = true;
+		}
+	}
+}
+
+void FieldRenderer::invalidateAll()
+{
+	std::fill(dirty_.begin(), dirty_.end(), true);
+}
+
+void FieldRenderer::update(const field::FieldMap &map)
+{
+	for(int cz = 0; cz < chunksZ_; ++cz){
+		for(int cx = 0; cx < chunksX_; ++cx){
+			if(dirty_[static_cast<size_t>(cz) * chunksX_ + cx]){
+				build(map, cx, cz);
+				dirty_[static_cast<size_t>(cz) * chunksX_ + cx] = false;
+			}
+		}
+	}
+}
+
+void FieldRenderer::build(const field::FieldMap &map, int chunkX, int chunkZ)
 {
 	const float cell = map.cellSize();
-	for(size_t type = 0; type < tiles.size(); ++type){
+	const int x0 = chunkX * kChunkSize, z0 = chunkZ * kChunkSize;
+	const int x1 = std::min(x0 + kChunkSize, map.width()), z1 = std::min(z0 + kChunkSize, map.depth());
+	auto &chunk = meshes_[static_cast<size_t>(chunkZ) * chunksX_ + chunkX];
+	for(size_t type = 0; type < tiles_.size(); ++type){
 		std::vector<vk_::Vertex> vertices;
 		std::vector<uint32_t> indices;
-		for(int z = 0; z < map.depth(); ++z){
-			for(int x = 0; x < map.width(); ++x){
+		for(int z = z0; z < z1; ++z){
+			for(int x = x0; x < x1; ++x){
 				if(map.get(x, z) != type){
 					continue;
 				}
-				const float x0 = x * cell, x1 = (x + 1) * cell, z0 = z * cell, z1 = (z + 1) * cell;
 				const uint32_t base = static_cast<uint32_t>(vertices.size());
-				// +Y側から見て反時計回りの頂点順(上向きの面)
-				vertices.push_back({{x0, 0.0f, z0}, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}});
-				vertices.push_back({{x0, 0.0f, z1}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}});
-				vertices.push_back({{x1, 0.0f, z1}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}});
-				vertices.push_back({{x1, 0.0f, z0}, {1.0f, 1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}});
+				// 頂点の順: (x,z) (x,z+1) (x+1,z+1) (x+1,z)。+Y側から見て反時計回り(上向きの面)。対角線は (x,z)-(x+1,z+1)(FieldMap::heightAtと同じ)
+				const int vx[4] = {x, x, x + 1, x + 1}, vz[4] = {z, z + 1, z + 1, z};
+				const float u[4] = {0.0f, 0.0f, 1.0f, 1.0f}, v[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+				for(int k = 0; k < 4; ++k){
+					vk_::Vertex vertex{};
+					vertex.position[0] = vx[k] * cell;
+					vertex.position[1] = map.vertexHeight(vx[k], vz[k]);
+					vertex.position[2] = vz[k] * cell;
+					vertex.color[0] = vertex.color[1] = vertex.color[2] = 1.0f;
+					vertex.uv[0] = u[k];
+					vertex.uv[1] = v[k];
+					map.vertexNormal(vx[k], vz[k], vertex.normal);
+					vertices.push_back(vertex);
+				}
 				for(uint32_t i : {0u, 1u, 2u, 2u, 3u, 0u}){
 					indices.push_back(base + i);
 				}
 			}
 		}
 		if(vertices.empty()){
+			chunk[type] = nullptr;
 			continue;
 		}
-		auto image = std::make_shared<SDL_::Image>(1, 1);
-		image->fillRect(SDL_::Color(tiles[type].r, tiles[type].g, tiles[type].b, 255));
-		Layer layer;
-		layer.mesh = std::make_shared<VulkanMesh>(window.getContext(), vertices.data(), static_cast<uint32_t>(vertices.size()),
+		chunk[type] = std::make_shared<VulkanMesh>(window_.getContext(), vertices.data(), static_cast<uint32_t>(vertices.size()),
 			indices.data(), static_cast<uint32_t>(indices.size()));
-		layer.material.texture = window.createTexture(image);
-		layer.material.specular = 0.0f;
-		layer.material.castShadow = false;
-		layer.material.receiveShadow = false;
-		layers_.push_back(std::move(layer));
 	}
 }
 
 void FieldRenderer::draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewProj) const
 {
 	const auto identity = geo::createIdentityMatrix4x4<float>();
-	for(const auto &layer : layers_){
-		window.draw(layer.mesh, viewProj, identity, layer.material);
+	for(const auto &chunk : meshes_){
+		for(size_t type = 0; type < chunk.size(); ++type){
+			if(chunk[type]){
+				window.draw(chunk[type], viewProj, identity, materials_[type]);
+			}
+		}
 	}
 }
 

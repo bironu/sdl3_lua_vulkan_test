@@ -457,6 +457,11 @@ void UiScript::pushWorld()
 	for(const auto &entry : view.values){
 		world[entry.first] = entry.second;
 	}
+	sol::table strings = impl_->lua.create_table();
+	for(const auto &entry : view.strings){
+		strings[entry.first] = entry.second;
+	}
+	world["strings"] = strings;
 }
 
 // いまのマウスの位置にある、最前面のinteractiveなウィジェットを求めて、enter/leaveを呼ぶ
