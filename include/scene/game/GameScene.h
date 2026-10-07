@@ -48,6 +48,8 @@ private:
 	static constexpr float kWalkSpeed = 1.6f;     // m/秒(歩きのモーションの足運びに合わせた値)
 	static constexpr float kSlowRunSpeed = 3.1f;  // m/秒(Slow Runのモーションの足運びに合わせた値。モーションが進む距離2.29m ÷ 0.73秒)
 	static constexpr float kFastRunSpeed = 5.7f;  // m/秒(Fast Run: 3.02m ÷ 0.53秒)
+	static constexpr float kClimbSpeed = 0.5f;    // 歩いて登れない少し急な坂を、ゆっくり登る速さ(m/秒)。Climbing Slopeのモーションの足運びに合わせてゆっくりめ
+	static constexpr float kClimbEnter = 0.85f;   // 先の勾配が、歩ける上限のこの割合を超えたら、登るモーションにする(境目で歩きと登りが入れ替わって止まらないよう、少し手前から)
 	static constexpr float kRollDistance = 4.5f;  // Stand To Rollで前へ転がる距離(モーションが進む距離。モーションの長さの間に、等速で進む)
 	static constexpr float kRunStick = 0.95f;     // 左スティックをこれ以上傾けると「最大」(走る)
 	static constexpr float kTapTime = 0.25f;      // Aボタンを、これより短く押して離したら単押し(転がる)。これ以上押し続けたら長押し(全力で走る)
@@ -77,11 +79,13 @@ private:
 
 	std::shared_ptr<VulkanModel> player_;
 	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
-	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionMartelo, MotionRoundhouse, MotionCount };
+	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionKickLow, MotionCount };
 	static bool isAction(int motion) { return motion >= MotionRoll; }
 	void startAction(int motion, float dirX, float dirZ);
 	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
-	void stepMove(float dirX, float dirZ, float distance);
+	// maxSlopeが0以上なら、地面の設定の勾配の上限の代わりにそれを使う(急な坂をゆっくり登るとき)
+	// 動いたらtrue
+	bool stepMove(float dirX, float dirZ, float distance, float maxSlope = -1.0f);
 	std::unique_ptr<model::VrmaPlayer> motions_[MotionCount];
 	// クロスフェード: モーションが切り替わったら、切り替わる直前の姿勢から、新しいモーションの姿勢へ、短い時間でなめらかに混ぜる
 	static constexpr float kFadeToAction = 0.10f;   // アクションを始めるとき(反応を遅らせないよう短く)
@@ -107,6 +111,7 @@ private:
 	size_t autoActionDone_ = 0; // 動作確認用の環境変数(VULKAN_AUTOACTION)の、実行済みの数
 	geo::AffineMap playerTransform_;
 	float playerX_ = 0.0f, playerZ_ = 0.0f;
+	float startX_ = 0.0f, startZ_ = 0.0f; // 最初の位置(ポーズ画面の「最初の位置へ戻る」で戻る)
 	float heading_ = 0.0f; // キャラの向き(Y軸まわり。+Zが0)
 	bool walking_ = false;
 

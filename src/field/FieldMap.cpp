@@ -25,6 +25,7 @@ FieldSettings loadFieldSettings(const std::string &relativePath)
 		result.tiles = table->get_or("tiles", result.tiles);
 		result.field = table->get_or("field", result.field);
 		result.maxSlope = table->get_or("maxSlope", result.maxSlope);
+		result.maxClimbSlope = table->get_or("maxClimbSlope", result.maxClimbSlope);
 	}
 	return result;
 }

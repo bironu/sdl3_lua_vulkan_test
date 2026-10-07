@@ -56,11 +56,12 @@ constexpr const char *kMotionPaths[] = {
 	"res/motion/Walking.vrma",         // 歩き(左スティックを倒しきらない)
 	"res/motion/Slow Run.vrma",        // 左スティックを最大に倒す
 	"res/motion/Fast Run.vrma",        // Aボタンを押しっぱなし + 左スティックを最大に倒す
+	"res/motion/Climbing Slope.vrma",  // 歩いて登れない少し急な坂へ進む(ゆっくり登る)
 	"res/motion/Stand To Roll.vrma",   // Aボタン単押し
 	"res/motion/Punching Right.vrma",  // R1
 	"res/motion/Punching Left.vrma",   // L1
-	"res/motion/Martelo 2.vrma",       // R2
-	"res/motion/Roundhouse Kick.vrma", // L2
+	"res/motion/Mma Kick Right High.vrma", // R2
+	"res/motion/Kicking Left Low.vrma",    // L2
 };
 }
 
@@ -92,6 +93,19 @@ void GameScene::setPaused(bool paused)
 void GameScene::command(const std::string &name, double value)
 {
 	if(name == "resume"){
+		setPaused(false);
+	}
+	else if(name == "respawn"){ // 最初の位置へ戻る(地形の端にはまって動けなくなったとき用)
+		playerX_ = startX_;
+		playerZ_ = startZ_;
+		heading_ = 0.0f;
+		motion_ = MotionIdle;
+		motionTime_ = 0.0f;
+		appliedMotion_ = -1; // フェードしない(急に位置が変わるので)
+		fadeDuration_ = 0.0f;
+		if(player_){
+			player_->resetPhysics(); // 髪やスカートの揺れを、元の位置へ
+		}
 		setPaused(false);
 	}
 	else if(name == "sensitivity"){
@@ -204,10 +218,12 @@ void GameScene::onCreate(uint32_t tick)
 	for(const auto &prop : map_.props()){
 		propRenderer_->preload(map_.propName(prop.prop)); // 置物のモデルは、最初の描画ではなく、ここで読む
 	}
-	movementRules_ = field::MovementRules::fromTiles(tiles_, settings.maxSlope);
+	movementRules_ = field::MovementRules::fromTiles(tiles_, settings.maxSlope, settings.maxClimbSlope);
 	propCollision_.build(map_, [this](const std::string &name){ return propRenderer_->footprint(name); });
 	playerX_ = fieldWidth() * 0.5f; // フィールドの真ん中から始める
 	playerZ_ = fieldDepth() * 0.5f;
+	startX_ = playerX_;
+	startZ_ = playerZ_;
 
 	// プレイヤー: キャラクタ選択画面で選んだキャラ(GameSession)。選択画面がGPU上に作ったモデルがあればそれを引き継ぎ、無ければ(データは読み込み済みなら
 	// キャッシュから)ここで作る。シーンの破棄で、まとめて手放される
@@ -294,13 +310,14 @@ void GameScene::capturePose(const model::Skeleton &skeleton, Pose &pose)
 	}
 }
 
-void GameScene::stepMove(float dirX, float dirZ, float distance)
+bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
 {
+	const float beforeX = playerX_, beforeZ = playerZ_;
 	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
 	const float targetX = std::clamp(playerX_ + dirX * distance, kPlayerRadius, fieldWidth() - kPlayerRadius);
 	const float targetZ = std::clamp(playerZ_ + dirZ * distance, kPlayerRadius, fieldDepth() - kPlayerRadius);
 	// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
-	field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ);
+	field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ, maxSlope);
 	// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
 	float pushedX = playerX_, pushedZ = playerZ_;
 	if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
@@ -312,6 +329,7 @@ void GameScene::stepMove(float dirX, float dirZ, float distance)
 			playerZ_ = pushedZ;
 		}
 	}
+	return playerX_ != beforeX || playerZ_ != beforeZ;
 }
 
 // アクション(転がる・攻撃)を始める。モーションが無ければ何もしない。転がるときは、入力の向き(dirX, dirZ。無入力なら0)へ向いてから転がる
@@ -333,7 +351,8 @@ void GameScene::startAction(int motion, float dirX, float dirZ)
 
 // 入力に合わせてプレイヤーを動かし、モーションを当てる:
 //   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
-//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Martelo 2、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
+//   歩いて登れない少し急な坂(maxSlope〜maxClimbSlope)へ進む: Climbing Slope(ゆっくり登る)
+//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Kicking Left Low(キーボードは X V Z C)
 //   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
 void GameScene::updatePlayer(float dt, uint32_t tick)
 {
@@ -369,7 +388,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		run = true;
 		actionDown = actionDown || autoRun[0] == '2';
 	}
-	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|mar|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
+	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|kl@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
 	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
 	if(autoAction){
 		const std::string all(autoAction);
@@ -386,7 +405,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		}
 		while(autoActionDone_ < actions.size() && static_cast<int>(tick - startTick_) >= actions[autoActionDone_].second){
 			const std::string &name = actions[autoActionDone_++].first;
-			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "mar" ? MotionMartelo : MotionRoundhouse;
+			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "kh" ? MotionKickHigh : MotionKickLow;
 		}
 	}
 	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
@@ -413,7 +432,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		actionHeldTime_ = 0.0f;
 	}
 	actionHeld_ = actionDown;
-	static const int kAttackMotions[4] = {MotionPunchRight, MotionMartelo, MotionPunchLeft, MotionRoundhouse};
+	static const int kAttackMotions[4] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionKickLow};
 	for(int i = 0; i < 4; ++i){
 		if(attack[i] && !actionPrev_[i] && !isAction(motion_)){
 			startAction(kAttackMotions[i], 0.0f, 0.0f);
@@ -448,7 +467,14 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		if(length > 0.0f){
 			walking_ = true;
 			const bool fast = run && actionDown && actionHeldTime_ >= kTapTime;
-			if(run){
+			// 向かう先が、歩いては登れない少し急な坂なら、ゆっくり登る(これより急な坂は、進めない)
+			const float ahead = field::slopeAhead(map_, playerX_, playerZ_, dx, dz);
+			const bool climbing = motions_[MotionClimb] && ahead > movementRules_.maxSlope * kClimbEnter && ahead <= movementRules_.maxClimbSlope;
+			if(climbing){
+				wanted = MotionClimb;
+				speed = kClimbSpeed;
+			}
+			else if(run){
 				wanted = fast ? MotionFastRun : MotionSlowRun;
 				speed = fast ? kFastRunSpeed : kSlowRunSpeed;
 			}
@@ -459,7 +485,13 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
 				wanted = MotionWalk;
 			}
-			stepMove(dx, dz, speed * dt);
+			const float limit = wanted == MotionClimb ? movementRules_.maxClimbSlope * 1.05f : -1.0f;
+			if(!stepMove(dx, dz, speed * dt, limit) && wanted != MotionClimb && motions_[MotionClimb] && ahead > 0.0f){
+				// 歩いては進めなかった(セルごとの勾配が、先の平均より急だったとき): 登れる坂なら、ゆっくり登る
+				if(stepMove(dx, dz, kClimbSpeed * dt, movementRules_.maxClimbSlope * 1.05f)){
+					wanted = MotionClimb;
+				}
+			}
 			heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
 		}
 		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)

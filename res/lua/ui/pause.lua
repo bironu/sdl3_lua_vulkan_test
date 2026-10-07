@@ -1,6 +1,6 @@
 -- GameScene のポーズ画面(Esc / Start で開く。開くたびに、このスクリプトが読み直される)。
 -- 操作: 上下で選ぶ、Enter / PadA で決定、左右で値の変更、Esc / Start / PadB で再開。マウスは、乗せると選択、クリックで決定。
--- ゲームへの命令は game.command(名前, 値)。名前はGameSceneの command() が受ける("resume", "sensitivity")
+-- ゲームへの命令は game.command(名前, 値)。名前はGameSceneの command() が受ける("resume", "respawn", "sensitivity")
 
 local itemSize = 56
 local itemGap = 84
@@ -57,6 +57,7 @@ end
 
 local definitions = {
 	{key = "PauseResume", activate = function() game.command("resume") end},
+	{key = "PauseRespawn", activate = function() game.command("respawn") end},
 	{key = "PauseLanguage", vars = function() return {name = languageName()} end,
 		activate = function() changeLanguage(1) end, step = changeLanguage},
 	{key = "PauseSensitivity", vars = function() return {value = formatSensitivity(sensitivity)} end,

@@ -24,6 +24,7 @@ strings = {
 	HudHelpQuit = "Esc / Start: ポーズ",
 	PauseTitle = "ポーズ",
 	PauseResume = "再開",
+	PauseRespawn = "最初の位置へ戻る",
 	PauseLanguage = "言語: {name}",
 	PauseSensitivity = "視点の感度: {value}",
 	PauseToTitle = "タイトルへ戻る",

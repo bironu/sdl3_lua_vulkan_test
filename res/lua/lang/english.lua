@@ -22,6 +22,7 @@ strings = {
 	HudHelpQuit = "Esc / Start: Pause",
 	PauseTitle = "Paused",
 	PauseResume = "Resume",
+	PauseRespawn = "Return to start",
 	PauseLanguage = "Language: {name}",
 	PauseSensitivity = "Look sensitivity: {value}",
 	PauseToTitle = "Back to title",
