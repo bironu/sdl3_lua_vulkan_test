@@ -52,7 +52,7 @@ namespace
 {
 // モーションのパス(game.assets.lua と同じパス)
 constexpr const char *kMotionPaths[] = {
-	"res/motion/VRMA_01.vrma",         // 立ち
+	"res/motion/Standing Idle.vrma",   // 立ち
 	"res/motion/Walking.vrma",         // 歩き(左スティックを倒しきらない)
 	"res/motion/Slow Run.vrma",        // 左スティックを最大に倒す
 	"res/motion/Fast Run.vrma",        // Aボタンを押しっぱなし + 左スティックを最大に倒す
@@ -62,6 +62,8 @@ constexpr const char *kMotionPaths[] = {
 	"res/motion/Punching Left.vrma",   // L1
 	"res/motion/Mma Kick Right High.vrma", // R2
 	"res/motion/Roundhouse Kick.vrma",    // L2
+	"res/motion/Standing To Crouched.vrma", // 坂を登り始める(しゃがむ)
+	"res/motion/Crouch To Stand.vrma",      // 坂を登り終わる(立ち上がる)
 };
 }
 
@@ -289,6 +291,10 @@ void GameScene::onCreate(uint32_t tick)
 	if(const char *pitch = SDL_getenv("VULKAN_PITCH")){
 		cameraPitch_ = std::clamp(static_cast<float>(SDL_atof(pitch)), kMinPitch, 1.3f);
 	}
+	// 動作確認用: VULKAN_YAW=ラジアン で、カメラの水平の角度の初期値(例: 1.57 で横から)
+	if(const char *yaw = SDL_getenv("VULKAN_YAW")){
+		cameraYaw_ = static_cast<float>(SDL_atof(yaw));
+	}
 	// マウスをウィンドウに取り込んで、視点の回転に使う
 	SDL_SetWindowRelativeMouseMode(window.get(), true);
 	lastTick_ = tick;
@@ -379,8 +385,12 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
 		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
 	}
-	static const bool autoWalk = SDL_getenv("VULKAN_AUTOWALK") != nullptr; // 動作確認用: 常に前へ進む入力にする
-	forward = autoWalk ? 1.0f : forward;
+	// 動作確認用: VULKAN_AUTOWALK=1 で、常に前へ進む入力にする。=2 なら、常に右へ(横から見るため)
+	static const char *autoWalk = SDL_getenv("VULKAN_AUTOWALK");
+	if(autoWalk){
+		forward = autoWalk[0] == '2' ? 0.0f : 1.0f;
+		right = autoWalk[0] == '2' ? 1.0f : right;
+	}
 	// 動作確認用: VULKAN_AUTORUN=1 で、スティックを最大に倒した入力にする。=2 なら、Aボタンも押しっぱなし(Fast Run)
 	static const char *autoRun = SDL_getenv("VULKAN_AUTORUN");
 	if(autoRun){
@@ -445,7 +455,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		pendingAuto_ = -1;
 	}
 
-	// 動き: アクション中は、転がるときだけ前へ進む。それ以外は、入力の向きへ
+	// 動き: アクション中は、転がるときだけ前へ進む(坂の登り始め・終わりのモーションの間は、止まる)。それ以外は、入力の向きへ
 	walking_ = false;
 	int wanted = MotionIdle;
 	if(isAction(motion_)){
@@ -454,54 +464,105 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		if(motion_ == MotionRoll){
 			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance / player->duration() * dt);
 		}
-		motionTime_ += dt;
+		const float rate = motion_ == MotionCrouchEnter ? settings_.climb.enterSpeed : motion_ == MotionCrouchExit ? settings_.climb.exitSpeed : 1.0f;
+		motionTime_ += dt * rate;
 		if(motionTime_ >= player->duration()){
-			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走りへ戻る
+			if(motion_ == MotionCrouchEnter){
+				climbing_ = true; // しゃがみ終わり: 登り始める
+				climbRelease_ = 0.0f;
+			}
+			else if(motion_ == MotionCrouchExit){
+				climbing_ = false; // 立ち上がり終わり
+			}
+			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走り・登りへ戻る
 			motionTime_ = 0.0f;
 			wanted = MotionIdle;
 		}
 	}
 	if(!isAction(motion_)){
 		float speed = 0.0f;
-		if(length > 0.0f){
-			walking_ = true;
-			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
-			// 向かう先が、歩いては登れない少し急な坂なら、ゆっくり登る(これより急な坂は、進めない)
-			const float ahead = field::slopeAhead(map_, playerX_, playerZ_, dx, dz);
-			const bool climbing = motions_[MotionClimb] && ahead > movementRules_.maxSlope * settings_.player.climbEnter && ahead <= movementRules_.maxClimbSlope;
-			if(climbing){
-				wanted = MotionClimb;
-				speed = settings_.player.climbSpeed;
-			}
-			else if(run){
-				wanted = fast ? MotionFastRun : MotionSlowRun;
-				speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
-			}
-			else{
-				wanted = MotionWalk;
-				speed = settings_.player.walkSpeed * magnitude;
-			}
-			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
-				wanted = MotionWalk;
-			}
-			const float limit = wanted == MotionClimb ? movementRules_.maxClimbSlope * 1.05f : -1.0f;
-			if(!stepMove(dx, dz, speed * dt, limit) && wanted != MotionClimb && motions_[MotionClimb] && ahead > 0.0f){
-				// 歩いては進めなかった(セルごとの勾配が、先の平均より急だったとき): 登れる坂なら、ゆっくり登る
-				if(stepMove(dx, dz, settings_.player.climbSpeed * dt, movementRules_.maxClimbSlope * 1.05f)){
-					wanted = MotionClimb;
+		const float climbLimit = movementRules_.maxClimbSlope * 1.05f;
+		const float ahead = length > 0.0f ? field::slopeAhead(map_, playerX_, playerZ_, dx, dz) : 0.0f;
+		if(climbing_){
+			// 登っている間: 先が登れる坂のうちは、登り続ける。登れる坂でなくなって(止まる・平らになる)しばらくしたら、立ち上がる
+			const bool keep = length > 0.0f && ahead > movementRules_.maxSlope * settings_.climb.exitSlopeRatio && ahead <= movementRules_.maxClimbSlope;
+			climbRelease_ = keep ? 0.0f : climbRelease_ + dt;
+			if(climbRelease_ >= settings_.climb.exitHold){
+				climbRelease_ = 0.0f;
+				if(motions_[MotionCrouchExit]){
+					startAction(MotionCrouchExit, 0.0f, 0.0f);
+				}
+				else{
+					climbing_ = false;
 				}
 			}
-			heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
+			else if(length > 0.0f){
+				walking_ = true;
+				wanted = MotionClimb;
+				stepMove(dx, dz, settings_.player.climbSpeed * dt, climbLimit);
+				heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
+				climbSlope_ += (std::max(ahead, 0.0f) - climbSlope_) * std::min(1.0f, 8.0f * dt);
+			}
 		}
-		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
-		if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
-			motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+		else if(length > 0.0f){
+			walking_ = true;
+			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
+			// 向かう先が、歩いては登れない少し急な坂なら、しゃがんでから、ゆっくり登る(これより急な坂は、進めない)
+			const bool climbable = motions_[MotionClimb] && ahead > movementRules_.maxSlope * settings_.player.climbEnter && ahead <= movementRules_.maxClimbSlope;
+			if(climbable){
+				climbSlope_ = ahead;
+				if(motions_[MotionCrouchEnter]){
+					startAction(MotionCrouchEnter, 0.0f, 0.0f);
+					heading_ = std::atan2(dx, dz); // 坂の方を向いてしゃがむ
+				}
+				else{
+					climbing_ = true;
+				}
+				walking_ = false;
+			}
+			else{
+				if(run){
+					wanted = fast ? MotionFastRun : MotionSlowRun;
+					speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
+				}
+				else{
+					wanted = MotionWalk;
+					speed = settings_.player.walkSpeed * magnitude;
+				}
+				if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
+					wanted = MotionWalk;
+				}
+				if(!stepMove(dx, dz, speed * dt) && motions_[MotionClimb] && ahead > 0.0f){
+					// 歩いては進めなかった(セルごとの勾配が、先の平均より急だったとき): 登れる坂なら、しゃがんでから登る
+					if(stepMove(dx, dz, settings_.player.climbSpeed * dt, climbLimit)){
+						climbSlope_ = ahead;
+						if(motions_[MotionCrouchEnter]){
+							startAction(MotionCrouchEnter, 0.0f, 0.0f);
+						}
+						else{
+							climbing_ = true;
+						}
+					}
+				}
+				heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
+			}
 		}
-		motion_ = wanted;
+		if(!isAction(motion_)){
+			// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
+			if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
+				motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+			}
+			motion_ = wanted;
+		}
+	}
+	// 坂を登っているとき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
+	{
+		const float target = motion_ == MotionClimb ? std::atan(climbSlope_) * settings_.climb.tiltFactor : 0.0f;
+		tilt_ += (target - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
-	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)));
+	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)) * geo::Quaternionf::createRotater(-tilt_, geo::Vector3f(1.0f, 0.0f, 0.0f)));
 
 	// モーション
 	auto *skeleton = player_->skeleton();

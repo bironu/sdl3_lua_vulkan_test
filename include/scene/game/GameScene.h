@@ -64,7 +64,7 @@ private:
 
 	std::shared_ptr<VulkanModel> player_;
 	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
-	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCount };
+	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCrouchEnter, MotionCrouchExit, MotionCount };
 	static bool isAction(int motion) { return motion >= MotionRoll; }
 	void startAction(int motion, float dirX, float dirZ);
 	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
@@ -83,6 +83,11 @@ private:
 	Pose fadeFrom_;          // フェード開始時の姿勢
 	int appliedMotion_ = -1; // 前のフレームに当てたモーション
 	float fadeTime_ = 0.0f, fadeDuration_ = 0.0f; // fadeTime_ < fadeDuration_ の間、フェード中
+	// 坂登り: 登り始めに「しゃがむ」アクション(MotionCrouchEnter)、登っている間は climbing_、登り終わりに「立ち上がる」アクション(MotionCrouchExit)
+	bool climbing_ = false;
+	float climbRelease_ = 0.0f;  // 登れる坂でなくなってからの時間(settings_.climb.exitHold で立ち上がる)
+	float climbSlope_ = 0.0f;    // 登っている坂の勾配(傾きの目標。なめらかにならしたもの)
+	float tilt_ = 0.0f;          // いまのキャラの傾き(ラジアン。坂を登るとき、坂に沿って後ろへ傾く)
 	int motion_ = MotionIdle;
 	float motionTime_ = 0.0f;
 	bool actionHeld_ = false;    // Aボタン(キーボードはSpace)が押されている

@@ -4,7 +4,7 @@ assets = {
 	-- (プレイヤーのモデルは、キャラクタ選択画面で選んだもの。選択画面が読んでおく)
 	-- キャラのモーション(VRMA): 立ち・歩き・走り(Slow/Fast)・急な坂を登る・転がる・攻撃(パンチ・キック)
 	animations = {
-		"res/motion/VRMA_01.vrma",
+		"res/motion/Standing Idle.vrma",
 		"res/motion/Walking.vrma",
 		"res/motion/Slow Run.vrma",
 		"res/motion/Fast Run.vrma",
@@ -14,5 +14,7 @@ assets = {
 		"res/motion/Punching Left.vrma",
 		"res/motion/Mma Kick Right High.vrma",
 		"res/motion/Roundhouse Kick.vrma",
+		"res/motion/Standing To Crouched.vrma",
+		"res/motion/Crouch To Stand.vrma",
 	},
 }

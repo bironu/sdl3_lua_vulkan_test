@@ -33,7 +33,7 @@ GameSettings loadGameSettings(const std::string &relativePath)
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "game settings: no 'settings' table in %s", relativePath.c_str());
 		return result;
 	}
-	const sol::optional<sol::table> player = (*settings)["player"], input = (*settings)["input"], camera = (*settings)["camera"], fade = (*settings)["fade"];
+	const sol::optional<sol::table> climb = (*settings)["climb"], player = (*settings)["player"], input = (*settings)["input"], camera = (*settings)["camera"], fade = (*settings)["fade"];
 	readFloat(player, "radius", result.player.radius);
 	readFloat(player, "walkSpeed", result.player.walkSpeed);
 	readFloat(player, "slowRunSpeed", result.player.slowRunSpeed);
@@ -42,6 +42,12 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(player, "climbEnter", result.player.climbEnter);
 	readFloat(player, "rollDistance", result.player.rollDistance);
 	readFloat(player, "turnSpeed", result.player.turnSpeed);
+	readFloat(climb, "tiltFactor", result.climb.tiltFactor);
+	readFloat(climb, "tiltSmooth", result.climb.tiltSmooth);
+	readFloat(climb, "enterSpeed", result.climb.enterSpeed);
+	readFloat(climb, "exitSpeed", result.climb.exitSpeed);
+	readFloat(climb, "exitHold", result.climb.exitHold);
+	readFloat(climb, "exitSlopeRatio", result.climb.exitSlopeRatio);
 	readFloat(input, "runStick", result.input.runStick);
 	readFloat(input, "tapTime", result.input.tapTime);
 	readFloat(input, "triggerOn", result.input.triggerOn);

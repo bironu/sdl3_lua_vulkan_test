@@ -21,6 +21,15 @@ struct GameSettings
 		float rollDistance = 4.5f;   // Stand To Rollで前へ転がる距離(モーションの長さの間に、等速で進む)
 		float turnSpeed = 12.0f;     // キャラが進む向きへ向く速さ(ラジアン/秒の目安)
 	} player;
+	struct Climb
+	{
+		float tiltFactor = 0.3f;     // 坂を登るとき、キャラを坂の角度のこの割合だけ(0〜1。1で坂に垂直)、坂に沿って傾ける。0で傾けない
+		float tiltSmooth = 8.0f;     // 傾きが目標へ追いつく速さ(1/秒。大きいほど速い)
+		float enterSpeed = 1.0f;     // 登り始めの「しゃがむ」モーション(Standing To Crouched)の再生速度の倍率
+		float exitSpeed = 2.0f;      // 登り終わりの「立ち上がる」モーション(Crouch To Stand)の再生速度の倍率(元が長いので速める)
+		float exitHold = 0.25f;      // 登れる坂でなくなって(止まるか、平らになって)から、立ち上がり始めるまでの待ち(秒。境目で出入りを繰り返さないよう)
+		float exitSlopeRatio = 0.6f; // 登っている間は、先の勾配が、歩ける上限のこの割合を下回るまで、登り続ける(登り始めより低く、境目で出入りしないよう)
+	} climb;
 	struct Input
 	{
 		float runStick = 0.95f;      // 左スティックをこれ以上傾けると「最大」(走る)
