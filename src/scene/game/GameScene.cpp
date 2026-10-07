@@ -21,6 +21,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace game
 {
@@ -49,8 +51,17 @@ float approachAngle(float a, float target, float maxStep)
 namespace
 {
 // モーションのパス(game.assets.lua と同じパス)
-constexpr const char *kWalkMotionPath = "res/motion/Walking.vrma";
-constexpr const char *kIdleMotionPath = "res/motion/VRMA_01.vrma";
+constexpr const char *kMotionPaths[] = {
+	"res/motion/VRMA_01.vrma",         // 立ち
+	"res/motion/Walking.vrma",         // 歩き(左スティックを倒しきらない)
+	"res/motion/Slow Run.vrma",        // 左スティックを最大に倒す
+	"res/motion/Fast Run.vrma",        // Aボタンを押しっぱなし + 左スティックを最大に倒す
+	"res/motion/Stand To Roll.vrma",   // Aボタン単押し
+	"res/motion/Punching Right.vrma",  // R1
+	"res/motion/Punching Left.vrma",   // L1
+	"res/motion/Martelo 2.vrma",       // R2
+	"res/motion/Roundhouse Kick.vrma", // L2
+};
 }
 
 GameScene::GameScene() = default;
@@ -224,16 +235,12 @@ void GameScene::onCreate(uint32_t tick)
 	}
 	player_->setAmbientBoost(0.0f);
 	if(player_->skeleton()){
-		if(const auto walk = resources().animation(kWalkMotionPath)){
-			walkPlayer_ = model::VrmaPlayer::create(walk, player_->data(), *player_->skeleton(), player_->morphs());
-			if(walkPlayer_){
-				walkPlayer_->setInPlace(true); // 前へ進むのはキャラの位置(playerX_/Z_)で行う。モーションは足踏みだけ
-			}
-		}
-		if(const auto idle = resources().animation(kIdleMotionPath)){
-			idlePlayer_ = model::VrmaPlayer::create(idle, player_->data(), *player_->skeleton(), player_->morphs());
-			if(idlePlayer_){
-				idlePlayer_->setInPlace(true);
+		for(int i = 0; i < MotionCount; ++i){
+			if(const auto animation = resources().animation(kMotionPaths[i])){
+				motions_[i] = model::VrmaPlayer::create(animation, player_->data(), *player_->skeleton(), player_->morphs());
+				if(motions_[i]){
+					motions_[i]->setInPlace(true); // 前へ進むのはキャラの位置(playerX_/Z_)で行う。モーションは、その場の動きだけ
+				}
 			}
 		}
 	}
@@ -277,12 +284,55 @@ void GameScene::onDestroy(uint32_t tick)
 	Scene::onDestroy(tick);
 }
 
-// 入力に合わせてプレイヤーを動かし、歩き/立ちのモーションを当てる
+void GameScene::stepMove(float dirX, float dirZ, float distance)
+{
+	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
+	const float targetX = std::clamp(playerX_ + dirX * distance, kPlayerRadius, fieldWidth() - kPlayerRadius);
+	const float targetZ = std::clamp(playerZ_ + dirZ * distance, kPlayerRadius, fieldDepth() - kPlayerRadius);
+	// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
+	field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ);
+	// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
+	float pushedX = playerX_, pushedZ = playerZ_;
+	if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
+		pushedX = std::clamp(pushedX, kPlayerRadius, fieldWidth() - kPlayerRadius);
+		pushedZ = std::clamp(pushedZ, kPlayerRadius, fieldDepth() - kPlayerRadius);
+		float checkX = playerX_, checkZ = playerZ_;
+		if(field::moveOnField(map_, movementRules_, kPlayerRadius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
+			playerX_ = pushedX;
+			playerZ_ = pushedZ;
+		}
+	}
+}
+
+// アクション(転がる・攻撃)を始める。モーションが無ければ何もしない。転がるときは、入力の向き(dirX, dirZ。無入力なら0)へ向いてから転がる
+void GameScene::startAction(int motion, float dirX, float dirZ)
+{
+	if(!motions_[motion]){
+		return;
+	}
+	if(motion == MotionRoll){
+		if(dirX != 0.0f || dirZ != 0.0f){
+			heading_ = std::atan2(dirX, dirZ);
+		}
+		rollDirX_ = std::sin(heading_);
+		rollDirZ_ = std::cos(heading_);
+	}
+	motion_ = motion;
+	motionTime_ = 0.0f;
+}
+
+// 入力に合わせてプレイヤーを動かし、モーションを当てる:
+//   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
+//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Martelo 2、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
+//   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
 void GameScene::updatePlayer(float dt, uint32_t tick)
 {
 	const bool *keys = SDL_GetKeyboardState(nullptr);
 	float right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
 	float forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
+	bool run = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+	bool actionDown = keys[SDL_SCANCODE_SPACE];
+	bool attack[4] = {keys[SDL_SCANCODE_X] != 0, keys[SDL_SCANCODE_V] != 0, keys[SDL_SCANCODE_Z] != 0, keys[SDL_SCANCODE_C] != 0}; // R1 R2 L1 L2
 	// ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックでカメラ(視点)を回す
 	if(const auto pad = getResources().getGamepad()){
 		constexpr float kCameraYawSpeed = 2.6f;   // 右スティックを倒しきったときの、水平の回転の速さ(ラジアン/秒)
@@ -292,39 +342,121 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		pad->rightStick(rx, ry);
 		right += lx;
 		forward -= ly; // スティックは下が+
+		run = run || std::sqrt(lx * lx + ly * ly) >= kRunStick;
 		cameraYaw_ -= rx * kCameraYawSpeed * sensitivity_ * dt;
 		cameraPitch_ = std::clamp(cameraPitch_ + ry * kCameraPitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
+		actionDown = actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
+		attack[0] = attack[0] || pad->button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+		attack[1] = attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > kTriggerOn;
+		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > kTriggerOn;
 	}
 	static const bool autoWalk = SDL_getenv("VULKAN_AUTOWALK") != nullptr; // 動作確認用: 常に前へ進む入力にする
 	forward = autoWalk ? 1.0f : forward;
+	// 動作確認用: VULKAN_AUTORUN=1 で、スティックを最大に倒した入力にする。=2 なら、Aボタンも押しっぱなし(Fast Run)
+	static const char *autoRun = SDL_getenv("VULKAN_AUTORUN");
+	if(autoRun){
+		run = true;
+		actionDown = actionDown || autoRun[0] == '2';
+	}
+	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|mar|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
+	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
+	if(autoAction){
+		const std::string all(autoAction);
+		std::vector<std::pair<std::string, int>> actions;
+		for(size_t start = 0; start < all.size();){
+			size_t end = all.find(',', start);
+			end = end == std::string::npos ? all.size() : end;
+			const std::string spec = all.substr(start, end - start);
+			const auto at = spec.find('@');
+			if(at != std::string::npos){
+				actions.emplace_back(spec.substr(0, at), std::atoi(spec.c_str() + at + 1));
+			}
+			start = end + 1;
+		}
+		while(autoActionDone_ < actions.size() && static_cast<int>(tick - startTick_) >= actions[autoActionDone_].second){
+			const std::string &name = actions[autoActionDone_++].first;
+			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "mar" ? MotionMartelo : MotionRoundhouse;
+		}
+	}
 	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
 	const float fx = -std::sin(cameraYaw_), fz = -std::cos(cameraYaw_);
 	const float rx = std::cos(cameraYaw_), rz = -std::sin(cameraYaw_);
 	float dx = fx * forward + rx * right;
 	float dz = fz * forward + rz * right;
 	const float length = std::sqrt(dx * dx + dz * dz);
-	walking_ = length > 0.0f;
-	if(walking_){
-		const float magnitude = std::min(length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
+	const float magnitude = std::min(length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
+	if(length > 0.0f){
 		dx /= length;
 		dz /= length;
-		// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
-		const float targetX = std::clamp(playerX_ + dx * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldWidth() - kPlayerRadius);
-		const float targetZ = std::clamp(playerZ_ + dz * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldDepth() - kPlayerRadius);
-		// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
-		field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ);
-		// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
-		float pushedX = playerX_, pushedZ = playerZ_;
-		if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
-			pushedX = std::clamp(pushedX, kPlayerRadius, fieldWidth() - kPlayerRadius);
-			pushedZ = std::clamp(pushedZ, kPlayerRadius, fieldDepth() - kPlayerRadius);
-			float checkX = playerX_, checkZ = playerZ_;
-			if(field::moveOnField(map_, movementRules_, kPlayerRadius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
-				playerX_ = pushedX;
-				playerZ_ = pushedZ;
-			}
+	}
+
+	// ボタンの押し始め・離したとき(アクションの開始)
+	const bool busy = isAction(motion_);
+	if(actionDown){
+		actionHeldTime_ += dt;
+	}
+	if(actionHeld_ && !actionDown){
+		if(actionHeldTime_ < kTapTime && !busy){
+			startAction(MotionRoll, dx, dz); // 単押し
 		}
-		heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
+		actionHeldTime_ = 0.0f;
+	}
+	actionHeld_ = actionDown;
+	static const int kAttackMotions[4] = {MotionPunchRight, MotionMartelo, MotionPunchLeft, MotionRoundhouse};
+	for(int i = 0; i < 4; ++i){
+		if(attack[i] && !actionPrev_[i] && !isAction(motion_)){
+			startAction(kAttackMotions[i], 0.0f, 0.0f);
+		}
+		actionPrev_[i] = attack[i];
+	}
+	if(pendingAuto_ >= 0){
+		if(!isAction(motion_)){
+			startAction(pendingAuto_, dx, dz);
+		}
+		pendingAuto_ = -1;
+	}
+
+	// 動き: アクション中は、転がるときだけ前へ進む。それ以外は、入力の向きへ
+	walking_ = false;
+	int wanted = MotionIdle;
+	if(isAction(motion_)){
+		wanted = motion_;
+		const auto &player = motions_[motion_];
+		if(motion_ == MotionRoll){
+			stepMove(rollDirX_, rollDirZ_, kRollDistance / player->duration() * dt);
+		}
+		motionTime_ += dt;
+		if(motionTime_ >= player->duration()){
+			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走りへ戻る
+			motionTime_ = 0.0f;
+			wanted = MotionIdle;
+		}
+	}
+	if(!isAction(motion_)){
+		float speed = 0.0f;
+		if(length > 0.0f){
+			walking_ = true;
+			const bool fast = run && actionDown && actionHeldTime_ >= kTapTime;
+			if(run){
+				wanted = fast ? MotionFastRun : MotionSlowRun;
+				speed = fast ? kFastRunSpeed : kSlowRunSpeed;
+			}
+			else{
+				wanted = MotionWalk;
+				speed = kWalkSpeed * magnitude;
+			}
+			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
+				wanted = MotionWalk;
+			}
+			stepMove(dx, dz, speed * dt);
+			heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
+		}
+		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
+		if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
+			motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+		}
+		motion_ = wanted;
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
@@ -340,16 +472,13 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(morphs){
 		morphs->resetWeights();
 	}
-	if(walking_ && walkPlayer_){
-		walkTime_ = std::fmod(walkTime_ + dt, walkPlayer_->duration() + 1e-3f);
-		walkPlayer_->apply(*skeleton, morphs, walkTime_);
-	}
-	else if(!walking_ && idlePlayer_){
-		idleTime_ = std::fmod(idleTime_ + dt, idlePlayer_->duration() + 1e-3f);
-		idlePlayer_->apply(*skeleton, morphs, idleTime_);
+	if(const auto &player = motions_[motion_]){
+		if(!isAction(motion_)){
+			motionTime_ = std::fmod(motionTime_ + dt, player->duration() + 1e-3f); // 立ち・歩き・走りは、ループ
+		}
+		player->apply(*skeleton, morphs, std::min(motionTime_, player->duration()));
 	}
 	player_->updatePose(dt);
-	(void)tick;
 }
 
 void GameScene::drawScene(const geo::Matrix4x4f &viewProj)

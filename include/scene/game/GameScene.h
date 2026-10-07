@@ -46,6 +46,12 @@ private:
 	// フィールド(地面のタイル): 原点の角から、x・z の正の向きへ広がる。縁には壁は無いが、外へは出られない(当たり判定)
 	static constexpr float kPlayerRadius = 0.3f;  // 壁との当たりの半径
 	static constexpr float kWalkSpeed = 1.6f;     // m/秒(歩きのモーションの足運びに合わせた値)
+	static constexpr float kSlowRunSpeed = 3.1f;  // m/秒(Slow Runのモーションの足運びに合わせた値。モーションが進む距離2.29m ÷ 0.73秒)
+	static constexpr float kFastRunSpeed = 5.7f;  // m/秒(Fast Run: 3.02m ÷ 0.53秒)
+	static constexpr float kRollDistance = 4.5f;  // Stand To Rollで前へ転がる距離(モーションが進む距離。モーションの長さの間に、等速で進む)
+	static constexpr float kRunStick = 0.95f;     // 左スティックをこれ以上傾けると「最大」(走る)
+	static constexpr float kTapTime = 0.25f;      // Aボタンを、これより短く押して離したら単押し(転がる)。これ以上押し続けたら長押し(全力で走る)
+	static constexpr float kTriggerOn = 0.5f;     // L2/R2を押したとみなすトリガーの値
 	static constexpr float kTurnSpeed = 12.0f;    // キャラが進む向きへ向く速さ(ラジアン/秒の目安)
 	// カメラの高さ・距離は、モデルの背の高さ(頂点の最大のY。applyModelHeight)に比例する。下は、背の高さ1.6mのモデルを基準にした比率
 	static constexpr float kReferenceHeight = 1.6f;
@@ -70,13 +76,25 @@ private:
 	void toScreen(float windowX, float windowY, float &x, float &y);
 
 	std::shared_ptr<VulkanModel> player_;
-	std::unique_ptr<model::VrmaPlayer> walkPlayer_;
-	std::unique_ptr<model::VrmaPlayer> idlePlayer_;
+	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
+	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionMartelo, MotionRoundhouse, MotionCount };
+	static bool isAction(int motion) { return motion >= MotionRoll; }
+	void startAction(int motion, float dirX, float dirZ);
+	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
+	void stepMove(float dirX, float dirZ, float distance);
+	std::unique_ptr<model::VrmaPlayer> motions_[MotionCount];
+	int motion_ = MotionIdle;
+	float motionTime_ = 0.0f;
+	bool actionHeld_ = false;    // Aボタン(キーボードはSpace)が押されている
+	float actionHeldTime_ = 0.0f;
+	bool actionPrev_[4] = {false, false, false, false}; // R1・R2・L1・L2(キーボードは X V Z C)が、前のフレームで押されていたか
+	float rollDirX_ = 0.0f, rollDirZ_ = 1.0f;
+	int pendingAuto_ = -1;      // 動作確認用: 押されたことにするアクション
+	size_t autoActionDone_ = 0; // 動作確認用の環境変数(VULKAN_AUTOACTION)の、実行済みの数
 	geo::AffineMap playerTransform_;
 	float playerX_ = 0.0f, playerZ_ = 0.0f;
 	float heading_ = 0.0f; // キャラの向き(Y軸まわり。+Zが0)
 	bool walking_ = false;
-	float walkTime_ = 0.0f, idleTime_ = 0.0f;
 
 	float cameraYaw_ = 0.0f;   // 注視点から見たカメラの水平角(0でプレイヤーの+Z側=キャラの正面側)
 	float cameraPitch_ = 0.25f;
