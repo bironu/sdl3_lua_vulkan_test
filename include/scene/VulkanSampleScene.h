@@ -81,7 +81,7 @@ private:
 	bool vrmListed_ = false;
 	int vrmIndex_ = -1;         // 表示中のVRMの番号(vrmPaths_の添字。MMDを表示中、または未選択なら-1)
 	int pendingVrmSlot_ = -1;   // 次のフレームで切り替える先(-1なら無し。vrmPaths_.size()はMMD)
-	// VRMAのモーション: 番号0=ダンス(res/motion/dance.vrma)、1〜7=res/motion/VRMA_01〜07.vrma、8=res/motion/Walking.fbx(FBXを直接読む)。キーボードの0〜8で再生する
+	// VRMAのモーション: 番号0=ダンス(res/motion/dance.vrma)、1〜7=res/motion/VRMA_01〜07.vrma、8=res/motion/Walking.vrma(MixamoのFBXをfbx2vrmaで変換したもの)。キーボードの0〜8で再生する
 	// (0はダンスの再生/停止、1〜7はそのモーションを最初から再生。停止中は休止ポーズ(Tポーズ)でまばたきだけ)
 	static constexpr int kMotionCount = 9;
 	std::array<std::unique_ptr<model::VrmaPlayer>, kMotionCount> vrmaPlayers_;

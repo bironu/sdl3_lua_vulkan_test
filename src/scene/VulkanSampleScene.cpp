@@ -194,7 +194,7 @@ void VulkanSampleScene::loadVrm(int index)
 				std::snprintf(path, sizeof(path), "res/motion/dance.vrma");
 			}
 			else if(i == 8){
-				std::snprintf(path, sizeof(path), "res/motion/Walking.fbx"); // FBX(Mixamo)を、そのまま読み込む
+				std::snprintf(path, sizeof(path), "res/motion/Walking.vrma"); // Mixamoのwalking(fbx2vrmaで変換したもの)
 			}
 			else{
 				std::snprintf(path, sizeof(path), "res/motion/VRMA_%02d.vrma", i);
@@ -273,7 +273,7 @@ void VulkanSampleScene::loadAllStep()
 					std::snprintf(motionPath, sizeof(motionPath), "res/motion/dance.vrma");
 				}
 				else if(i == 8){
-					std::snprintf(motionPath, sizeof(motionPath), "res/motion/Walking.fbx");
+					std::snprintf(motionPath, sizeof(motionPath), "res/motion/Walking.vrma");
 				}
 				else{
 					std::snprintf(motionPath, sizeof(motionPath), "res/motion/VRMA_%02d.vrma", i);
