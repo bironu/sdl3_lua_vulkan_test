@@ -2,6 +2,9 @@
 /build/
 /dist/
 
+# モーションの元データ(FBXなど)。ゲームが使うのは res/motion/ の変換済み(.vrma)で、FBXは tools の fbx2vrma で変換する
+/motion_src/
+
 # macOS
 .DS_Store
 
