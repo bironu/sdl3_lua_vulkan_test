@@ -13,6 +13,6 @@ assets = {
 		"res/motion/Punching Right.vrma",
 		"res/motion/Punching Left.vrma",
 		"res/motion/Mma Kick Right High.vrma",
-		"res/motion/Kicking Left Low.vrma",
+		"res/motion/Roundhouse Kick.vrma",
 	},
 }

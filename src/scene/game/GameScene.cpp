@@ -61,7 +61,7 @@ constexpr const char *kMotionPaths[] = {
 	"res/motion/Punching Right.vrma",  // R1
 	"res/motion/Punching Left.vrma",   // L1
 	"res/motion/Mma Kick Right High.vrma", // R2
-	"res/motion/Kicking Left Low.vrma",    // L2
+	"res/motion/Roundhouse Kick.vrma",    // L2
 };
 }
 
@@ -352,7 +352,7 @@ void GameScene::startAction(int motion, float dirX, float dirZ)
 // 入力に合わせてプレイヤーを動かし、モーションを当てる:
 //   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
 //   歩いて登れない少し急な坂(maxSlope〜maxClimbSlope)へ進む: Climbing Slope(ゆっくり登る)
-//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Kicking Left Low(キーボードは X V Z C)
+//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
 //   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
 void GameScene::updatePlayer(float dt, uint32_t tick)
 {
@@ -388,7 +388,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		run = true;
 		actionDown = actionDown || autoRun[0] == '2';
 	}
-	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|kl@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
+	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
 	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
 	if(autoAction){
 		const std::string all(autoAction);
@@ -405,7 +405,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		}
 		while(autoActionDone_ < actions.size() && static_cast<int>(tick - startTick_) >= actions[autoActionDone_].second){
 			const std::string &name = actions[autoActionDone_++].first;
-			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "kh" ? MotionKickHigh : MotionKickLow;
+			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "kh" ? MotionKickHigh : MotionRoundhouse;
 		}
 	}
 	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
@@ -432,7 +432,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		actionHeldTime_ = 0.0f;
 	}
 	actionHeld_ = actionDown;
-	static const int kAttackMotions[4] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionKickLow};
+	static const int kAttackMotions[4] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionRoundhouse};
 	for(int i = 0; i < 4; ++i){
 		if(attack[i] && !actionPrev_[i] && !isAction(motion_)){
 			startAction(kAttackMotions[i], 0.0f, 0.0f);

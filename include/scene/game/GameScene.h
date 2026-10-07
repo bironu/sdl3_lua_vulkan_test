@@ -82,7 +82,7 @@ private:
 
 	std::shared_ptr<VulkanModel> player_;
 	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
-	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionKickLow, MotionCount };
+	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCount };
 	static bool isAction(int motion) { return motion >= MotionRoll; }
 	void startAction(int motion, float dirX, float dirZ);
 	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
