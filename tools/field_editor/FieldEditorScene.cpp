@@ -1,4 +1,5 @@
 #include "FieldEditorScene.h"
+#include "field/PropCatalog.h"
 #include "geo/AffineMap.h"
 #include "geo/Calculator.h"
 #include "resources/ResourcePaths.h"
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <string>
 
 namespace
@@ -65,20 +67,9 @@ void FieldEditorScene::onCreate(uint32_t tick)
 		quit();
 		return;
 	}
-	for(const auto &tile : tiles_){
-		VulkanMaterial material;
-		material.texture = window.createTexture(solidImage(tile.r, tile.g, tile.b));
-		material.specular = 0.0f;
-		material.castShadow = false;
-		material.receiveShadow = false;
-		tileMaterials_.push_back(material);
-	}
-	baseMaterial_.texture = window.createTexture(solidImage(24, 26, 32));
-	baseMaterial_.specular = 0.0f;
-	baseMaterial_.castShadow = false;
-	baseMaterial_.receiveShadow = false;
-	quad_ = vk_::createFloorMesh(window.getContext(), 1.0f);
 	white_ = window.createTexture(solidImage(255, 255, 255));
+	propRenderer_ = std::make_unique<game::PropRenderer>(window, resources());
+	refreshProps();
 
 	reload();
 	targetX_ = map_.width() * map_.cellSize() * 0.5f;
@@ -93,6 +84,44 @@ void FieldEditorScene::onCreate(uint32_t tick)
 	lastTick_ = startTick_ = tick;
 }
 
+void FieldEditorScene::refreshProps()
+{
+	const std::string selected = selectedProp();
+	propList_ = field::listProps();
+	propSel_ = -1;
+	for(size_t i = 0; i < propList_.size(); ++i){
+		if(propList_[i] == selected){
+			propSel_ = static_cast<int>(i);
+		}
+	}
+	if(propSel_ < 0 && !propList_.empty()){
+		propSel_ = 0;
+	}
+}
+
+std::string FieldEditorScene::selectedProp() const
+{
+	return propSel_ >= 0 && propSel_ < static_cast<int>(propList_.size()) ? propList_[static_cast<size_t>(propSel_)] : std::string();
+}
+
+void FieldEditorScene::importFile(const std::string &path)
+{
+	std::string name;
+	if(!field::importProp(path, name)){
+		return;
+	}
+	SDL_Log("field: imported prop %s", name.c_str());
+	refreshProps();
+	for(size_t i = 0; i < propList_.size(); ++i){
+		if(propList_[i] == name){
+			propSel_ = static_cast<int>(i);
+			propPage_ = propSel_ / kPropsPerPage;
+		}
+	}
+	mode_ = ModeProp;
+	++importedCount_;
+}
+
 void FieldEditorScene::toScreen(float windowX, float windowY, float &x, float &y)
 {
 	const auto size = getWindow().getSize();
@@ -100,45 +129,178 @@ void FieldEditorScene::toScreen(float windowX, float windowY, float &x, float &y
 	y = windowY / static_cast<float>(std::max(size.getY(), 1)) * uiContext_->screenHeight();
 }
 
-bool FieldEditorScene::pickCell(float windowX, float windowY, int &cellX, int &cellZ) const
+bool FieldEditorScene::pickGround(float windowX, float windowY, float hit[3]) const
 {
 	const auto size = const_cast<FieldEditorScene *>(this)->getWindow().getSize();
 	const float nx = windowX / static_cast<float>(std::max(size.getX(), 1)) * 2.0f - 1.0f;
 	const float ny = 1.0f - windowY / static_cast<float>(std::max(size.getY(), 1)) * 2.0f; // 上が+
 	const float aspect = static_cast<float>(size.getX()) / static_cast<float>(std::max(size.getY(), 1));
 	// カメラの座標系(eye → target を前、世界の上を+Yとして、右・上を求める)
-	const geo::Vector3f target(targetX_, 0.0f, targetZ_);
+	const geo::Vector3f target(targetX_, targetY_, targetZ_);
 	const geo::Vector3f forward = geo::Vector3f::normalize(target - eye_);
 	const geo::Vector3f right = geo::Vector3f::normalize(geo::Vector3f::cross(forward, geo::Vector3f(0.0f, 1.0f, 0.0f)));
 	const geo::Vector3f up = geo::Vector3f::cross(right, forward);
 	const float tanHalf = std::tan(fovY_ * 0.5f);
-	const geo::Vector3f dir = forward + right * (nx * tanHalf * aspect) + up * (ny * tanHalf);
-	if(dir.getY() >= -1e-5f){
-		return false; // 地平線より上
-	}
-	const float t = -eye_.getY() / dir.getY();
-	const float wx = eye_.getX() + dir.getX() * t, wz = eye_.getZ() + dir.getZ() * t;
-	cellX = static_cast<int>(std::floor(wx / map_.cellSize()));
-	cellZ = static_cast<int>(std::floor(wz / map_.cellSize()));
-	return map_.inside(cellX, cellZ);
+	const geo::Vector3f dir = geo::Vector3f::normalize(forward + right * (nx * tanHalf * aspect) + up * (ny * tanHalf));
+	const float origin[3] = {eye_.getX(), eye_.getY(), eye_.getZ()};
+	const float direction[3] = {dir.getX(), dir.getY(), dir.getZ()};
+	float t = 0.0f;
+	return map_.raycast(origin, direction, distance_ * 4.0f + 200.0f, t, hit);
 }
 
-void FieldEditorScene::paint(int cellX, int cellZ)
+void FieldEditorScene::beginStroke()
 {
-	const uint8_t before = map_.get(cellX, cellZ);
-	if(map_.set(cellX, cellZ, static_cast<uint8_t>(brush_))){
-		stroke_.push_back({cellX, cellZ, before});
-		dirty_ = true;
+	painting_ = true;
+	stroke_ = Action();
+	touchedHeights_.clear();
+	if(hasHit_){
+		flattenHeight_ = map_.heightAt(hit_[0], hit_[2]);
 	}
 }
 
 void FieldEditorScene::endStroke()
 {
 	painting_ = false;
-	if(!stroke_.empty()){
-		undoStack_.push_back(std::move(stroke_));
-		stroke_.clear();
+	commit(std::move(stroke_));
+	stroke_ = Action();
+	touchedHeights_.clear();
+}
+
+void FieldEditorScene::commit(Action &&action)
+{
+	if(!action.empty()){
+		undoStack_.push_back(std::move(action));
+		dirty_ = true;
 	}
+}
+
+void FieldEditorScene::paintTiles(float x, float z)
+{
+	const float cell = map_.cellSize();
+	const int cx = static_cast<int>(std::floor(x / cell)), cz = static_cast<int>(std::floor(z / cell));
+	for(int dz = -radius_; dz <= radius_; ++dz){
+		for(int dx = -radius_; dx <= radius_; ++dx){
+			const int tx = cx + dx, tz = cz + dz;
+			if(!map_.inside(tx, tz)){
+				continue;
+			}
+			if(radius_ > 0){
+				const float ex = (tx + 0.5f) * cell - x, ez = (tz + 0.5f) * cell - z;
+				if(std::sqrt(ex * ex + ez * ez) > radius_ * cell + 0.01f){
+					continue;
+				}
+			}
+			const uint8_t before = map_.get(tx, tz);
+			if(map_.set(tx, tz, static_cast<uint8_t>(brush_))){
+				stroke_.tiles.push_back({tz * map_.width() + tx, before});
+				renderer_->invalidate(tx, tz, tx, tz);
+			}
+		}
+	}
+}
+
+void FieldEditorScene::sculpt(float x, float z, float dt)
+{
+	const float cell = map_.cellSize();
+	const float reach = static_cast<float>(radius_ + 1);
+	const int cx = static_cast<int>(std::round(x / cell)), cz = static_cast<int>(std::round(z / cell));
+	const bool lowerKey = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LSHIFT] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RSHIFT];
+	int tool = tool_;
+	if(lowerKey && tool == ToolRaise){
+		tool = ToolLower;
+	}
+	else if(lowerKey && tool == ToolLower){
+		tool = ToolRaise;
+	}
+	const int span = radius_ + 2;
+	// ならすときは、変える前の高さから平均を求める(順番に依存しないように、先に新しい値を決める)
+	struct Change { int vx, vz; float height; };
+	std::vector<Change> changes;
+	for(int vz = cz - span; vz <= cz + span; ++vz){
+		for(int vx = cx - span; vx <= cx + span; ++vx){
+			if(!map_.insideVertex(vx, vz)){
+				continue;
+			}
+			const float ex = vx * cell - x, ez = vz * cell - z;
+			const float distance = std::sqrt(ex * ex + ez * ez) / cell;
+			if(distance > reach){
+				continue;
+			}
+			const float falloff = 1.0f - distance / reach;
+			const float weight = falloff * falloff * (3.0f - 2.0f * falloff);
+			const float height = map_.vertexHeight(vx, vz);
+			float target = height;
+			switch(tool){
+			case ToolRaise:
+				target = height + 6.0f * dt * weight;
+				break;
+			case ToolLower:
+				target = height - 6.0f * dt * weight;
+				break;
+			case ToolSmooth: {
+				const float average = (height + map_.vertexHeight(vx - 1, vz) + map_.vertexHeight(vx + 1, vz) + map_.vertexHeight(vx, vz - 1) + map_.vertexHeight(vx, vz + 1)) / 5.0f;
+				target = height + (average - height) * std::min(1.0f, 10.0f * dt * weight);
+				break;
+			}
+			case ToolFlatten:
+				target = height + (flattenHeight_ - height) * std::min(1.0f, 12.0f * dt * weight);
+				break;
+			}
+			changes.push_back({vx, vz, std::clamp(target, -60.0f, 60.0f)});
+		}
+	}
+	for(const auto &change : changes){
+		const int index = map_.vertexIndex(change.vx, change.vz);
+		const int16_t before = map_.rawHeightAt(index);
+		if(map_.setVertexHeight(change.vx, change.vz, change.height)){
+			if(touchedHeights_.insert(index).second){
+				stroke_.heights.push_back({index, before});
+			}
+			renderer_->invalidate(change.vx - 1, change.vz - 1, change.vx, change.vz);
+		}
+	}
+}
+
+void FieldEditorScene::placeProp(float x, float z)
+{
+	const std::string name = selectedProp();
+	if(name.empty() || !map_.inside(static_cast<int>(std::floor(x / map_.cellSize())), static_cast<int>(std::floor(z / map_.cellSize())))){
+		return;
+	}
+	Action action;
+	const size_t index = map_.addProp(name, x, z, propYaw_, propScale_, propLift_);
+	action.props.push_back({true, index, map_.props()[index]});
+	commit(std::move(action));
+}
+
+void FieldEditorScene::updateHoverProp()
+{
+	hoverProp_ = -1;
+	if(mode_ != ModeProp || !hasHit_){
+		return;
+	}
+	float best = 1e9f;
+	for(size_t i = 0; i < map_.props().size(); ++i){
+		const auto &prop = map_.props()[i];
+		const float dx = prop.x - hit_[0], dz = prop.z - hit_[2];
+		const float distance = std::sqrt(dx * dx + dz * dz);
+		const float reach = std::max(propRenderer_->radius(map_.propName(prop.prop)) * prop.scale * 0.7f, 0.6f);
+		if(distance <= reach && distance < best){
+			best = distance;
+			hoverProp_ = static_cast<int>(i);
+		}
+	}
+}
+
+void FieldEditorScene::removeHoveredProp()
+{
+	if(hoverProp_ < 0 || hoverProp_ >= static_cast<int>(map_.props().size())){
+		return;
+	}
+	Action action;
+	action.props.push_back({false, static_cast<size_t>(hoverProp_), map_.removeProp(static_cast<size_t>(hoverProp_))});
+	commit(std::move(action));
+	hoverProp_ = -1;
 }
 
 void FieldEditorScene::undo()
@@ -146,10 +308,26 @@ void FieldEditorScene::undo()
 	if(undoStack_.empty()){
 		return;
 	}
-	for(auto it = undoStack_.back().rbegin(); it != undoStack_.back().rend(); ++it){
-		map_.set(it->x, it->z, it->before);
-	}
+	Action action = std::move(undoStack_.back());
 	undoStack_.pop_back();
+	for(auto it = action.props.rbegin(); it != action.props.rend(); ++it){
+		if(it->added){
+			map_.removeProp(it->index);
+		}
+		else{
+			map_.insertProp(it->index, it->prop);
+		}
+	}
+	for(auto it = action.heights.rbegin(); it != action.heights.rend(); ++it){
+		map_.setRawHeight(it->index, it->before);
+		const int vx = it->index % map_.vertexCountX(), vz = it->index / map_.vertexCountX();
+		renderer_->invalidate(vx - 1, vz - 1, vx, vz);
+	}
+	for(auto it = action.tiles.rbegin(); it != action.tiles.rend(); ++it){
+		const int x = it->index % map_.width(), z = it->index / map_.width();
+		map_.set(x, z, it->before);
+		renderer_->invalidate(x, z, x, z);
+	}
 	dirty_ = true;
 }
 
@@ -162,19 +340,59 @@ void FieldEditorScene::save()
 	}
 }
 
+void FieldEditorScene::rebuildField()
+{
+	renderer_ = std::make_unique<game::FieldRenderer>(vulkanWindow(*this), map_, tiles_);
+}
+
 void FieldEditorScene::reload()
 {
 	if(map_.load(filePath(), tiles_)){
-		SDL_Log("field: loaded %s", filePath().c_str());
+		SDL_Log("field: loaded %s (%dx%d, %zu props)", filePath().c_str(), map_.width(), map_.depth(), map_.props().size());
 	}
+	rebuildField();
 	undoStack_.clear();
 	dirty_ = false;
 }
 
 void FieldEditorScene::command(const std::string &name, double value)
 {
-	if(name == "brush"){
+	if(name == "mode"){
+		mode_ = std::clamp(static_cast<int>(value), 0, 2);
+	}
+	else if(name == "brush"){
 		brush_ = std::clamp(static_cast<int>(value), 0, static_cast<int>(tiles_.size()) - 1);
+	}
+	else if(name == "tool"){
+		tool_ = std::clamp(static_cast<int>(value), 0, static_cast<int>(ToolCount) - 1);
+	}
+	else if(name == "radius"){
+		radius_ = std::clamp(static_cast<int>(value), 0, 12);
+	}
+	else if(name == "prop"){ // ページの中の何番目か
+		const int index = propPage_ * kPropsPerPage + static_cast<int>(value);
+		if(index >= 0 && index < static_cast<int>(propList_.size())){
+			propSel_ = index;
+		}
+	}
+	else if(name == "page"){
+		const int pages = std::max(1, (static_cast<int>(propList_.size()) + kPropsPerPage - 1) / kPropsPerPage);
+		propPage_ = std::clamp(propPage_ + static_cast<int>(value), 0, pages - 1);
+	}
+	else if(name == "yaw"){
+		propYaw_ = std::fmod(propYaw_ + static_cast<float>(value) * 0.0174532925f, 6.2831853f);
+	}
+	else if(name == "scale"){
+		propScale_ = std::clamp(propScale_ * static_cast<float>(value), 0.1f, 20.0f);
+	}
+	else if(name == "lift"){
+		propLift_ = std::clamp(propLift_ + static_cast<float>(value), -20.0f, 50.0f);
+	}
+	else if(name == "collision"){
+		showCollision_ = !showCollision_;
+	}
+	else if(name == "delete"){
+		removeHoveredProp();
 	}
 	else if(name == "save"){
 		save();
@@ -185,19 +403,29 @@ void FieldEditorScene::command(const std::string &name, double value)
 	else if(name == "undo"){
 		undo();
 	}
-	else if(name == "fill"){
-		std::vector<Edit> edits;
-		for(int z = 0; z < map_.depth(); ++z){
-			for(int x = 0; x < map_.width(); ++x){
-				if(map_.get(x, z) != brush_){
-					edits.push_back({x, z, map_.get(x, z)});
+	else if(name == "fill"){ // モードのとおり: タイルなら全面を塗る、高さなら全面を平らにする(いまの高さ0へ)
+		Action action;
+		if(mode_ == ModeHeight){
+			for(int i = 0; i < map_.vertexCountX() * map_.vertexCountZ(); ++i){
+				if(map_.rawHeightAt(i) != 0){
+					action.heights.push_back({i, map_.rawHeightAt(i)});
+					map_.setRawHeight(i, 0);
 				}
 			}
 		}
-		map_.fill(static_cast<uint8_t>(brush_));
-		if(!edits.empty()){
-			undoStack_.push_back(std::move(edits));
-			dirty_ = true;
+		else{
+			for(int z = 0; z < map_.depth(); ++z){
+				for(int x = 0; x < map_.width(); ++x){
+					if(map_.get(x, z) != brush_){
+						action.tiles.push_back({z * map_.width() + x, map_.get(x, z)});
+					}
+				}
+			}
+			map_.fill(static_cast<uint8_t>(brush_));
+		}
+		if(!action.empty()){
+			commit(std::move(action));
+			renderer_->invalidate(0, 0, map_.width(), map_.depth());
 		}
 	}
 	else{
@@ -213,8 +441,13 @@ void FieldEditorScene::dispatch(const SDL_Event &event)
 	switch(event.type){
 	case SDL_EVENT_KEY_DOWN:
 	case SDL_EVENT_KEY_UP:
-		if(!event.key.repeat){ // Escなどのキーは、Luaのスクリプトが受ける(メニューの開閉。保存・読み直し・終了は、メニューから)
+		if(!event.key.repeat || event.key.key == SDLK_PAGEUP || event.key.key == SDLK_PAGEDOWN){ // Escなどのキーは、Luaのスクリプトが受ける(メニューの開閉。保存・読み直し・終了は、メニューから)
 			ui_->onKey(SDL_GetKeyName(event.key.key), event.type == SDL_EVENT_KEY_DOWN);
+		}
+		break;
+	case SDL_EVENT_DROP_FILE:
+		if(event.drop.data){
+			importFile(event.drop.data);
 		}
 		break;
 	case SDL_EVENT_MOUSE_MOTION: {
@@ -237,13 +470,17 @@ void FieldEditorScene::dispatch(const SDL_Event &event)
 		ui_->onMouseButton(event.button.button, down, x, y);
 		if(event.button.button == SDL_BUTTON_LEFT){
 			if(down && !ui_->hasHover()){
-				painting_ = true;
-				int cx, cz;
-				if(pickCell(event.button.x, event.button.y, cx, cz)){
-					paint(cx, cz);
+				hasHit_ = pickGround(event.button.x, event.button.y, hit_);
+				if(mode_ == ModeProp){
+					if(hasHit_){
+						placeProp(hit_[0], hit_[2]);
+					}
+				}
+				else{
+					beginStroke(); // 塗り・彫りは、onIdleで毎フレーム続ける
 				}
 			}
-			else if(!down){
+			else if(!down && painting_){
 				endStroke();
 			}
 		}
@@ -253,7 +490,7 @@ void FieldEditorScene::dispatch(const SDL_Event &event)
 		break;
 	}
 	case SDL_EVENT_MOUSE_WHEEL:
-		distance_ = std::clamp(distance_ * std::exp(-event.wheel.y * 0.1f), 4.0f, 80.0f);
+		distance_ = std::clamp(distance_ * std::exp(-event.wheel.y * 0.1f), 4.0f, 120.0f);
 		break;
 	default:
 		break;
@@ -263,29 +500,121 @@ void FieldEditorScene::dispatch(const SDL_Event &event)
 void FieldEditorScene::drawField(const geo::Matrix4x4f &viewProj)
 {
 	auto &window = vulkanWindow(*this);
-	const float cell = map_.cellSize();
-	// 土台(マスの隙間が、格子線に見える)
-	{
-		geo::AffineMap base;
-		base.setPos(geo::Vector3f(map_.width() * cell * 0.5f, -0.02f, map_.depth() * cell * 0.5f));
-		base.setScale(geo::Vector3f(map_.width() * cell, 1.0f, map_.depth() * cell));
-		window.draw(quad_, viewProj * base.getMatrix(), base.getMatrix(), baseMaterial_);
-	}
-	for(int z = 0; z < map_.depth(); ++z){
-		for(int x = 0; x < map_.width(); ++x){
-			geo::AffineMap tile;
-			tile.setPos(geo::Vector3f((x + 0.5f) * cell, 0.0f, (z + 0.5f) * cell));
-			tile.setScale(geo::Vector3f(cell * 0.96f, 1.0f, cell * 0.96f));
-			window.draw(quad_, viewProj * tile.getMatrix(), tile.getMatrix(), tileMaterials_[std::min<size_t>(map_.get(x, z), tileMaterials_.size() - 1)]);
+	renderer_->update(map_);
+	renderer_->draw(window, viewProj);
+	propRenderer_->draw(map_, viewProj);
+	if(showCollision_){ // 置物の足元の当たり(ゲームで歩いて当たる範囲)の長方形
+		for(const auto &prop : map_.props()){
+			const auto &shape = propRenderer_->footprint(map_.propName(prop.prop));
+			if(!shape.valid){
+				continue;
+			}
+			geo::AffineMap mark;
+			mark.setPos(geo::Vector3f(prop.x, map_.propBaseY(prop) + propRenderer_->height(map_.propName(prop.prop)) * prop.scale + 0.05f, prop.z)); // 地面では、物の中に隠れる。物のてっぺんへ投影して見せる
+			mark.setRotation(geo::Quaternionf::createRotater(prop.yaw, geo::Vector3f(0.0f, 1.0f, 0.0f)) * geo::Quaternionf::createRotater(-1.5707963f, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+			mark.setScale(geo::Vector3f(1.0f, 1.0f, 1.0f));
+			// 長方形の中心へずらした板(置いた向きで回る)
+			geo::AffineMap center;
+			center.setPos(geo::Vector3f((shape.minX + shape.maxX) * 0.5f * prop.scale, -(shape.minZ + shape.maxZ) * 0.5f * prop.scale, 0.0f)); // 板のyは、寝かせるとワールドの-Zになる
+			center.setScale(geo::Vector3f((shape.maxX - shape.minX) * prop.scale, (shape.maxZ - shape.minZ) * prop.scale, 1.0f));
+			window.drawSprite3D(white_, viewProj * mark.getMatrix() * center.getMatrix(), 1.0f, 0.6f, 0.1f, 0.5f);
 		}
 	}
-	// カーソルのあるマス(半透明の白い板)
-	if(hoverX_ >= 0 && !ui_->hasHover()){
-		geo::AffineMap mark;
-		mark.setPos(geo::Vector3f((hoverX_ + 0.5f) * cell, 0.03f, (hoverZ_ + 0.5f) * cell));
-		mark.setRotation(geo::Quaternionf::createRotater(-1.5707963f, geo::Vector3f(1.0f, 0.0f, 0.0f)));
-		mark.setScale(geo::Vector3f(cell, cell, 1.0f));
-		window.drawSprite3D(white_, viewProj * mark.getMatrix(), 1.0f, 1.0f, 1.0f, 0.4f);
+	if(!hasHit_ || ui_->hasHover()){
+		return;
+	}
+	const float cell = map_.cellSize();
+	if(mode_ == ModeProp){
+		if(hoverProp_ >= 0){ // 消す対象: 足元に赤い印
+			const auto &prop = map_.props()[static_cast<size_t>(hoverProp_)];
+			const float size = std::max(propRenderer_->radius(map_.propName(prop.prop)) * prop.scale * 2.0f, 1.0f);
+			geo::AffineMap mark;
+			mark.setPos(geo::Vector3f(prop.x, map_.propBaseY(prop) + 0.05f, prop.z));
+			mark.setRotation(geo::Quaternionf::createRotater(-1.5707963f, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+			mark.setScale(geo::Vector3f(size, size, 1.0f));
+			window.drawSprite3D(white_, viewProj * mark.getMatrix(), 1.0f, 0.2f, 0.2f, 0.45f);
+		}
+		else if(!selectedProp().empty()){ // 置く前の見本
+			propRenderer_->drawOne(selectedProp(), hit_[0], map_.heightAt(hit_[0], hit_[2]) + propLift_, hit_[2], propYaw_, propScale_, viewProj);
+		}
+		return;
+	}
+	// ブラシの範囲(半透明の白い板。高さは、マスの角の高い方)
+	const int cx = static_cast<int>(std::floor(hit_[0] / cell)), cz = static_cast<int>(std::floor(hit_[2] / cell));
+	const int span = mode_ == ModeHeight ? radius_ + 1 : radius_;
+	for(int dz = -span; dz <= span; ++dz){
+		for(int dx = -span; dx <= span; ++dx){
+			const int x = cx + dx, z = cz + dz;
+			if(!map_.inside(x, z)){
+				continue;
+			}
+			const float ex = (x + 0.5f) * cell - hit_[0], ez = (z + 0.5f) * cell - hit_[2];
+			const float distance = std::sqrt(ex * ex + ez * ez);
+			if(radius_ > 0 || mode_ == ModeHeight){
+				if(distance > (mode_ == ModeHeight ? radius_ + 1 : radius_) * cell + 0.01f){
+					continue;
+				}
+			}
+			else if(dx != 0 || dz != 0){
+				continue;
+			}
+			const float top = std::max({map_.vertexHeight(x, z), map_.vertexHeight(x + 1, z), map_.vertexHeight(x, z + 1), map_.vertexHeight(x + 1, z + 1)});
+			geo::AffineMap mark;
+			mark.setPos(geo::Vector3f((x + 0.5f) * cell, top + 0.04f, (z + 0.5f) * cell));
+			mark.setRotation(geo::Quaternionf::createRotater(-1.5707963f, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+			mark.setScale(geo::Vector3f(cell, cell, 1.0f));
+			window.drawSprite3D(white_, viewProj * mark.getMatrix(), 1.0f, 1.0f, 1.0f, mode_ == ModeHeight ? 0.18f : 0.35f);
+		}
+	}
+}
+
+// 動作確認用: "命令,値,...;命令,値,..." の1つ
+void FieldEditorScene::runAuto(const std::string &spec)
+{
+	std::vector<std::string> parts;
+	std::stringstream stream(spec);
+	for(std::string part; std::getline(stream, part, ',');){
+		parts.push_back(part);
+	}
+	if(parts.empty()){
+		return;
+	}
+	auto number = [&](size_t i){ return i < parts.size() ? std::atof(parts[i].c_str()) : 0.0; };
+	const std::string &name = parts[0];
+	if(name == "stroke"){ // stroke,x,z,フレーム数: そのワールド座標を、いまのモード・道具で、ドラッグし続けたことにする
+		hit_[0] = static_cast<float>(number(1));
+		hit_[2] = static_cast<float>(number(2));
+		hit_[1] = map_.heightAt(hit_[0], hit_[2]);
+		hasHit_ = true;
+		if(mode_ == ModeProp){
+			placeProp(hit_[0], hit_[2]);
+		}
+		else{
+			beginStroke();
+			for(int i = 0; i < std::max(1, static_cast<int>(number(3))); ++i){
+				if(mode_ == ModeTile){
+					paintTiles(hit_[0], hit_[2]);
+				}
+				else{
+					sculpt(hit_[0], hit_[2], 1.0f / 60.0f);
+				}
+			}
+			endStroke();
+		}
+		hasHit_ = false;
+	}
+	else if(name == "cam"){ // cam,yaw,pitch,距離,x,z
+		yaw_ = static_cast<float>(number(1));
+		pitch_ = static_cast<float>(number(2));
+		distance_ = static_cast<float>(number(3));
+		targetX_ = static_cast<float>(number(4));
+		targetZ_ = static_cast<float>(number(5));
+	}
+	else if(name == "import"){
+		importFile(spec.substr(spec.find(',') + 1));
+	}
+	else{
+		command(name, number(1));
 	}
 }
 
@@ -300,22 +629,24 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 	const float dt = std::min(static_cast<float>(tick - lastTick_) * 0.001f, 0.1f);
 	lastTick_ = tick;
 
-	// 動作確認用: VULKAN_AUTOPAINT="x,z,タイル番号@ミリ秒" で、そのマスを塗る(画面を撮って確認するため)。VULKAN_AUTOSAVE=1 で、塗った後に保存
-	static const char *autoPaint = SDL_getenv("VULKAN_AUTOPAINT");
-	if(autoPaint && !autoDone_ && static_cast<int>(tick - startTick_) >= 500){
-		autoDone_ = true;
-		int x0 = 0, z0 = 0, t = 0;
-		if(std::sscanf(autoPaint, "%d,%d,%d", &x0, &z0, &t) == 3){
-			brush_ = t;
-			for(int i = 0; i < 6; ++i){
-				for(int j = 0; j < 4; ++j){
-					paint(x0 + i, z0 + j);
-				}
+	// 動作確認用: VULKAN_AUTOCMD="命令,値,...@ミリ秒;..."(時刻の昇順)で、シーン開始からその時間後に、その編集をする(画面を撮って確認するため)。
+	//   命令: mode,N / tool,N / brush,N / radius,N / prop,N / yaw,度 / scale,倍 / save / stroke,x,z,フレーム数 / cam,yaw,pitch,距離,x,z / import,パス / undo
+	static const char *autoCmd = SDL_getenv("VULKAN_AUTOCMD");
+	if(autoCmd){
+		const std::string all(autoCmd);
+		std::vector<std::pair<std::string, int>> commands;
+		for(size_t start = 0; start < all.size();){
+			size_t end = all.find(';', start);
+			end = end == std::string::npos ? all.size() : end;
+			const std::string spec = all.substr(start, end - start);
+			const auto at = spec.rfind('@');
+			if(at != std::string::npos){
+				commands.emplace_back(spec.substr(0, at), std::atoi(spec.c_str() + at + 1));
 			}
-			endStroke();
-			if(SDL_getenv("VULKAN_AUTOSAVE")){
-				save();
-			}
+			start = end + 1;
+		}
+		while(autoDone_ < commands.size() && static_cast<int>(tick - startTick_) >= commands[autoDone_].second){
+			runAuto(commands[autoDone_++].first);
 		}
 	}
 
@@ -351,32 +682,60 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 	targetX_ = std::clamp(targetX_, 0.0f, map_.width() * map_.cellSize());
 	targetZ_ = std::clamp(targetZ_, 0.0f, map_.depth() * map_.cellSize());
 	yaw_ += (keys[SDL_SCANCODE_Q] - keys[SDL_SCANCODE_E]) * 1.5f * dt;
+	// 注視点の高さは、地面に付いていく(急に変わらないよう、なめらかに)
+	const float groundY = map_.heightAt(targetX_, targetZ_);
+	targetY_ += (groundY - targetY_) * std::min(1.0f, 8.0f * dt);
 
-	const geo::Vector3f target(targetX_, 0.0f, targetZ_);
+	const geo::Vector3f target(targetX_, targetY_, targetZ_);
 	eye_ = target + geo::Vector3f(std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_), std::cos(pitch_) * std::cos(yaw_)) * distance_;
 	const auto view = geo::createLookAt<float>(eye_, target, {0.0f, 1.0f, 0.0f});
-	const auto proj = vk_::createPerspective(fovY_, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 300.0f);
+	const auto proj = vk_::createPerspective(fovY_, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 400.0f);
 	window.setCameraPosition(eye_);
 
-	// カーソルのマス、ドラッグで塗る
-	if(!pickCell(mouseX_, mouseY_, hoverX_, hoverZ_)){
-		hoverX_ = hoverZ_ = -1;
-	}
-	if(painting_ && hoverX_ >= 0){
-		paint(hoverX_, hoverZ_);
+	// カーソルの指す地面。ドラッグ中は、塗り・彫りを続ける
+	hasHit_ = !ui_->hasHover() && !rotating_ && pickGround(mouseX_, mouseY_, hit_);
+	updateHoverProp();
+	if(painting_ && hasHit_){
+		if(mode_ == ModeTile){
+			paintTiles(hit_[0], hit_[2]);
+		}
+		else if(mode_ == ModeHeight){
+			sculpt(hit_[0], hit_[2], dt);
+		}
 	}
 
 	drawField(proj * view);
 
 	// 画面の部品へ、状態を渡す
 	auto &world = uiContext_->world();
+	world.values["mode"] = static_cast<float>(mode_);
 	world.values["brush"] = static_cast<float>(brush_);
-	world.values["cellX"] = static_cast<float>(hoverX_);
-	world.values["cellZ"] = static_cast<float>(hoverZ_);
+	world.values["tool"] = static_cast<float>(tool_);
+	world.values["radius"] = static_cast<float>(radius_);
+	world.values["propSel"] = static_cast<float>(propSel_ - propPage_ * kPropsPerPage); // ページの中の何番目か(ページの外ならはみ出す)
+	world.values["propPage"] = static_cast<float>(propPage_);
+	world.values["propPages"] = static_cast<float>(std::max(1, (static_cast<int>(propList_.size()) + kPropsPerPage - 1) / kPropsPerPage));
+	world.values["propYaw"] = propYaw_ * 57.2957795f;
+	world.values["propScale"] = propScale_;
+	world.values["propLift"] = propLift_;
+	world.values["propCount"] = static_cast<float>(map_.props().size());
+	world.values["cellX"] = hasHit_ ? std::floor(hit_[0] / map_.cellSize()) : -1.0f;
+	world.values["cellZ"] = hasHit_ ? std::floor(hit_[2] / map_.cellSize()) : -1.0f;
+	world.values["hoverHeight"] = hasHit_ ? hit_[1] : 0.0f;
 	world.values["dirty"] = dirty_ ? 1.0f : 0.0f;
 	world.values["saved"] = static_cast<float>(savedCount_);
+	world.values["imported"] = static_cast<float>(importedCount_);
 	world.values["width"] = static_cast<float>(map_.width());
 	world.values["depth"] = static_cast<float>(map_.depth());
+	for(int i = 0; i < kPropsPerPage; ++i){
+		const size_t index = static_cast<size_t>(propPage_ * kPropsPerPage + i);
+		std::string label = index < propList_.size() ? propList_[index] : std::string();
+		const auto dot = label.rfind('.');
+		if(dot != std::string::npos){
+			label.erase(dot);
+		}
+		world.strings["prop" + std::to_string(i + 1)] = label;
+	}
 	world.fps = dt > 0.0f ? (world.fps <= 0.0f ? 1.0f / dt : world.fps + (1.0f / dt - world.fps) * 0.1f) : world.fps;
 	padNavigator_.poll(getResources(), *ui_, tick);
 	ui_->update(dt, static_cast<float>(tick - startTick_) * 0.001f);
