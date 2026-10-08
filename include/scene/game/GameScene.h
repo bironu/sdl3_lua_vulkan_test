@@ -64,7 +64,7 @@ private:
 
 	std::shared_ptr<VulkanModel> player_;
 	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
-	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCrouchEnter, MotionCrouchExit, MotionCount };
+	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCount };
 	static bool isAction(int motion) { return motion >= MotionRoll; }
 	void startAction(int motion, float dirX, float dirZ);
 	// 向き(dirX, dirZ。単位ベクトル)へ、distanceメートル進む(縁・水・勾配・置物で止まる)
@@ -72,6 +72,11 @@ private:
 	// 動いたらtrue
 	bool stepMove(float dirX, float dirZ, float distance, float maxSlope = -1.0f);
 	std::unique_ptr<model::VrmaPlayer> motions_[MotionCount];
+	float loopSeam_[MotionCount] = {}; // モーションの最初と最後の姿勢の差(骨の回転の差の合計。ラジアン)
+	// ループするモーション(立ち・歩き・走り・登り)の、時刻timeの姿勢を当てる。つなぎ目が大きいモーションは、折り返しの部分を、モーションの終わり側と始め側を混ぜてつなぐ
+	void applyLooped(int motion, float time, model::Skeleton &skeleton, model::MorphSet *morphs);
+	// ループの1周期の長さ(つなぎ目を混ぜるモーションは、混ぜる分だけ短い)
+	float loopLength(int motion) const;
 	// クロスフェード: モーションが切り替わったら、切り替わる直前の姿勢から、新しいモーションの姿勢へ、短い時間でなめらかに混ぜる
 	struct Pose
 	{
@@ -83,17 +88,26 @@ private:
 	Pose fadeFrom_;          // フェード開始時の姿勢
 	int appliedMotion_ = -1; // 前のフレームに当てたモーション
 	float fadeTime_ = 0.0f, fadeDuration_ = 0.0f; // fadeTime_ < fadeDuration_ の間、フェード中
-	// 坂登り: 登り始めに「しゃがむ」アクション(MotionCrouchEnter)、登っている間は climbing_、登り終わりに「立ち上がる」アクション(MotionCrouchExit)
-	bool climbing_ = false;
-	float climbRelease_ = 0.0f;  // 登れる坂でなくなってからの時間(settings_.climb.exitHold で立ち上がる)
+	// 坂登り: 坂の勾配に応じて、登りのモーションを連続的に混ぜる(切り替えない)
+	float climbWeight_ = 0.0f;   // 登りのモーションの混ざり具合(0=歩き・走りだけ、1=登りだけ)
+	float climbTime_ = 0.0f;     // 登りのモーションの再生位置(ループ)
+	Pose basePose_;              // 登りを混ぜる前の、歩き・走りの姿勢
 	float climbSlope_ = 0.0f;    // 登っている坂の勾配(傾きの目標。なめらかにならしたもの)
 	float tilt_ = 0.0f;          // いまのキャラの傾き(ラジアン。坂を登るとき、坂に沿って後ろへ傾く)
 	int motion_ = MotionIdle;
 	float motionTime_ = 0.0f;
+	bool inputArmed_ = false;    // シーン開始時に押されていたボタンが、離されたか(それまでは、ボタンを無視する)
 	bool actionHeld_ = false;    // Aボタン(キーボードはSpace)が押されている
 	float actionHeldTime_ = 0.0f;
 	bool actionPrev_[4] = {false, false, false, false}; // R1・R2・L1・L2(キーボードは X V Z C)が、前のフレームで押されていたか
 	float rollDirX_ = 0.0f, rollDirZ_ = 1.0f;
+	// 転がるときの進み方: モーションの腰の前後の動き(足が着いている間は進まない)から求めた、時刻(0〜1)→進んだ割合(0〜1)の表
+	std::shared_ptr<const model::HumanoidAnimation> rollAnimation_;
+	std::vector<float> rollProfile_;
+	void buildRollProfile();
+	float rollProgress(float normalizedTime) const;
+	bool stickMoving_ = false, stickRunning_ = false; // 左スティックの、歩き・走りの状態(遊びを持たせるため、前のフレームの状態を覚える)
+	float stickDip_ = 0.0f;     // 走っている間に、スティックが runExit を下回っている時間
 	int pendingAuto_ = -1;      // 動作確認用: 押されたことにするアクション
 	size_t autoActionDone_ = 0; // 動作確認用の環境変数(VULKAN_AUTOACTION)の、実行済みの数
 	geo::AffineMap playerTransform_;

@@ -33,24 +33,34 @@ GameSettings loadGameSettings(const std::string &relativePath)
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "game settings: no 'settings' table in %s", relativePath.c_str());
 		return result;
 	}
-	const sol::optional<sol::table> climb = (*settings)["climb"], player = (*settings)["player"], input = (*settings)["input"], camera = (*settings)["camera"], fade = (*settings)["fade"];
+	const sol::optional<sol::table> motion = (*settings)["motion"], climb = (*settings)["climb"], player = (*settings)["player"], input = (*settings)["input"], camera = (*settings)["camera"], fade = (*settings)["fade"];
 	readFloat(player, "radius", result.player.radius);
 	readFloat(player, "walkSpeed", result.player.walkSpeed);
 	readFloat(player, "slowRunSpeed", result.player.slowRunSpeed);
 	readFloat(player, "fastRunSpeed", result.player.fastRunSpeed);
 	readFloat(player, "climbSpeed", result.player.climbSpeed);
-	readFloat(player, "climbEnter", result.player.climbEnter);
 	readFloat(player, "rollDistance", result.player.rollDistance);
+	readFloat(player, "rollRate", result.player.rollRate);
+	readFloat(player, "rollStartOffset", result.player.rollStartOffset);
+	readFloat(player, "rollCancelProgress", result.player.rollCancelProgress);
+	readFloat(player, "rollMotionTravel", result.player.rollMotionTravel);
 	readFloat(player, "turnSpeed", result.player.turnSpeed);
+	readFloat(motion, "seamThreshold", result.motion.seamThreshold);
+	readFloat(motion, "loopBlend", result.motion.loopBlend);
 	readFloat(climb, "tiltFactor", result.climb.tiltFactor);
 	readFloat(climb, "tiltSmooth", result.climb.tiltSmooth);
-	readFloat(climb, "enterSpeed", result.climb.enterSpeed);
-	readFloat(climb, "exitSpeed", result.climb.exitSpeed);
-	readFloat(climb, "exitHold", result.climb.exitHold);
-	readFloat(climb, "exitSlopeRatio", result.climb.exitSlopeRatio);
+	readFloat(climb, "blendLow", result.climb.blendLow);
+	readFloat(climb, "blendHigh", result.climb.blendHigh);
+	readFloat(climb, "riseRate", result.climb.riseRate);
+	readFloat(climb, "fallRate", result.climb.fallRate);
 	readFloat(input, "runStick", result.input.runStick);
+	readFloat(input, "runExit", result.input.runExit);
+	readFloat(input, "runGrace", result.input.runGrace);
+	readFloat(input, "moveEnter", result.input.moveEnter);
+	readFloat(input, "moveExit", result.input.moveExit);
 	readFloat(input, "tapTime", result.input.tapTime);
 	readFloat(input, "triggerOn", result.input.triggerOn);
+	readFloat(input, "rollOnPress", result.input.rollOnPress);
 	readFloat(camera, "referenceHeight", result.camera.referenceHeight);
 	readFloat(camera, "height", result.camera.height);
 	readFloat(camera, "minEyeHeight", result.camera.minEyeHeight);
@@ -66,6 +76,7 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(camera, "approachFraction", result.camera.approachFraction);
 	readFloat(fade, "toAction", result.fade.toAction);
 	readFloat(fade, "fromAction", result.fade.fromAction);
+	readFloat(fade, "fromActionMoving", result.fade.fromActionMoving);
 	readFloat(fade, "locomotion", result.fade.locomotion);
 	return result;
 }

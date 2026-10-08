@@ -62,8 +62,6 @@ constexpr const char *kMotionPaths[] = {
 	"res/motion/Punching Left.vrma",   // L1
 	"res/motion/Mma Kick Right High.vrma", // R2
 	"res/motion/Roundhouse Kick.vrma",    // L2
-	"res/motion/Standing To Crouched.vrma", // 坂を登り始める(しゃがむ)
-	"res/motion/Crouch To Stand.vrma",      // 坂を登り終わる(立ち上がる)
 };
 }
 
@@ -227,6 +225,14 @@ void GameScene::onCreate(uint32_t tick)
 	playerZ_ = fieldDepth() * 0.5f;
 	startX_ = playerX_;
 	startZ_ = playerZ_;
+	// 動作確認用: VULKAN_START=x,z で、開始位置を指定する(最初の位置へ戻るときも、そこへ戻る)
+	if(const char *start = SDL_getenv("VULKAN_START")){
+		float sx = 0.0f, sz = 0.0f;
+		if(std::sscanf(start, "%f,%f", &sx, &sz) == 2){
+			startX_ = playerX_ = sx;
+			startZ_ = playerZ_ = sz;
+		}
+	}
 
 	// プレイヤー: キャラクタ選択画面で選んだキャラ(GameSession)。選択画面がGPU上に作ったモデルがあればそれを引き継ぎ、無ければ(データは読み込み済みなら
 	// キャッシュから)ここで作る。シーンの破棄で、まとめて手放される
@@ -256,12 +262,40 @@ void GameScene::onCreate(uint32_t tick)
 	if(player_->skeleton()){
 		for(int i = 0; i < MotionCount; ++i){
 			if(const auto animation = resources().animation(kMotionPaths[i])){
+				if(i == MotionRoll){
+					rollAnimation_ = animation;
+					buildRollProfile();
+				}
 				motions_[i] = model::VrmaPlayer::create(animation, player_->data(), *player_->skeleton(), player_->morphs());
 				if(motions_[i]){
 					motions_[i]->setInPlace(true); // 前へ進むのはキャラの位置(playerX_/Z_)で行う。モーションは、その場の動きだけ
 				}
 			}
 		}
+	}
+	// ループのつなぎ目: 最初と最後の姿勢が大きく違う(ループ用に作られていない)モーションを調べる(loopSeam_: 骨の回転の差の合計。ラジアン)。
+	// 差が大きいと、ループの折り返しで姿勢が飛ぶ(登りのモーションが、4秒ごとに唐突に立ち上がって見える原因だった)。そのモーションは、折り返しで混ぜてつなぐ(applyLooped)
+	if(auto *skeleton = player_->skeleton()){
+		for(int m = 0; m < MotionCount; ++m){
+			if(!motions_[m]){
+				continue;
+			}
+			Pose first, last;
+			skeleton->resetPose();
+			motions_[m]->apply(*skeleton, nullptr, 0.0f);
+			capturePose(*skeleton, first);
+			skeleton->resetPose();
+			motions_[m]->apply(*skeleton, nullptr, motions_[m]->duration());
+			capturePose(*skeleton, last);
+			float sum = 0.0f;
+			for(size_t i = 0; i < first.rotations.size(); ++i){
+				const auto &a = first.rotations[i], &b = last.rotations[i];
+				const float d = std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
+				sum += 2.0f * std::acos(d);
+			}
+			loopSeam_[m] = sum;
+		}
+		skeleton->resetPose();
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
@@ -317,6 +351,97 @@ void GameScene::capturePose(const model::Skeleton &skeleton, Pose &pose)
 	}
 }
 
+// 転がるモーションは、変換のとき、前へ進む分(rollMotionTravel)を、時間に比例して引いてある(その場で転がる形)。
+// 引く前の腰の前後の動き = いまの腰の前後の動き + 引いた分(rollMotionTravel × 時刻の割合)。これが、モーションの足の動きに合った進み方。
+// 常に前へ(戻らない)になるよう、累積の最大を取って、最後を1にそろえる
+void GameScene::buildRollProfile()
+{
+	rollProfile_.clear();
+	const auto &animation = rollAnimation_;
+	if(!animation || animation->hipsTimes.size() < 2 || animation->hipsTimes.size() != animation->hipsTranslations.size()){
+		return;
+	}
+	const auto &times = animation->hipsTimes;
+	const auto &positions = animation->hipsTranslations;
+	const float duration = times.back();
+	const float travel = std::max(settings_.player.rollMotionTravel, 0.01f);
+	constexpr int kSamples = 128;
+	size_t k = 0;
+	float peak = 0.0f;
+	for(int i = 0; i <= kSamples; ++i){
+		const float t = duration * static_cast<float>(i) / kSamples;
+		while(k + 2 < times.size() && times[k + 1] < t){
+			++k;
+		}
+		const float span = std::max(times[k + 1] - times[k], 1e-6f);
+		const float f = std::clamp((t - times[k]) / span, 0.0f, 1.0f);
+		const float z = positions[k].z + (positions[k + 1].z - positions[k].z) * f - positions[0].z;
+		peak = std::max(peak, z + travel * t / std::max(duration, 1e-6f));
+		rollProfile_.push_back(peak);
+	}
+	const float total = std::max(rollProfile_.back(), 1e-4f);
+	for(auto &value : rollProfile_){
+		value = std::clamp(value / total, 0.0f, 1.0f);
+	}
+}
+
+float GameScene::rollProgress(float normalizedTime) const
+{
+	const float t = std::clamp(normalizedTime, 0.0f, 1.0f);
+	if(rollProfile_.size() < 2){
+		return t; // 表が無いときは、等速
+	}
+	const float x = t * static_cast<float>(rollProfile_.size() - 1);
+	const size_t i = std::min(static_cast<size_t>(x), rollProfile_.size() - 2);
+	return rollProfile_[i] + (rollProfile_[i + 1] - rollProfile_[i]) * (x - static_cast<float>(i));
+}
+
+float GameScene::loopLength(int motion) const
+{
+	const auto &player = motions_[motion];
+	if(!player){
+		return 1.0f;
+	}
+	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
+		return player->duration();
+	}
+	return player->duration() - std::min(settings_.motion.loopBlend, player->duration() * 0.4f);
+}
+
+// つなぎ目を混ぜるループ: 周期 L = 長さ - F。時刻 u が 0〜F の間は、(終わり側 L+u の姿勢)から(始め側 u の姿勢)へ混ぜる(u=0 で前の周期の終わりと、u=F で始めの続きと、ちょうどつながる)
+void GameScene::applyLooped(int motion, float time, model::Skeleton &skeleton, model::MorphSet *morphs)
+{
+	const auto &player = motions_[motion];
+	if(!player){
+		return;
+	}
+	const float duration = player->duration();
+	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
+		player->apply(skeleton, morphs, std::min(time, duration));
+		return;
+	}
+	const float overlap = std::min(settings_.motion.loopBlend, duration * 0.4f);
+	const float length = duration - overlap;
+	const float u = std::fmod(time, length);
+	if(u >= overlap){
+		player->apply(skeleton, morphs, u);
+		return;
+	}
+	player->apply(skeleton, morphs, length + u);
+	Pose tail;
+	capturePose(skeleton, tail);
+	skeleton.resetPose();
+	player->apply(skeleton, morphs, u);
+	const float t = u / overlap;
+	const float alpha = t * t * (3.0f - 2.0f * t);
+	for(size_t i = 0; i < skeleton.boneCount(); ++i){
+		const int bone = static_cast<int>(i);
+		const model::Vec3 &from = tail.translations[i], &to = skeleton.boneTranslation(bone);
+		skeleton.setBoneRotation(bone, model::Quat::slerp(tail.rotations[i], skeleton.boneRotation(bone), alpha));
+		skeleton.setBoneTranslation(bone, {from.x + (to.x - from.x) * alpha, from.y + (to.y - from.y) * alpha, from.z + (to.z - from.z) * alpha});
+	}
+}
+
 bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
 {
 	const float beforeX = playerX_, beforeZ = playerZ_;
@@ -354,6 +479,9 @@ void GameScene::startAction(int motion, float dirX, float dirZ)
 	}
 	motion_ = motion;
 	motionTime_ = 0.0f;
+	if(motion == MotionRoll){
+		motionTime_ = std::min(settings_.player.rollStartOffset, motions_[motion]->duration() * 0.5f); // 助走・かがみを飛ばして、すぐ飛び込む
+	}
 }
 
 // 入力に合わせてプレイヤーを動かし、モーションを当てる:
@@ -374,9 +502,24 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		float lx, ly, rx, ry;
 		pad->leftStick(lx, ly);
 		pad->rightStick(rx, ry);
-		right += lx;
-		forward -= ly; // スティックは下が+
-		run = run || std::sqrt(lx * lx + ly * ly) >= settings_.input.runStick;
+		// 歩き出し・走り出しに遊びを持たせる(スティックが最大まで倒れ切らない・値がぶれる、への対策):
+		//   歩き: moveEnter 以上で動き出し、moveExit を下回るまで動き続ける(小さい傾きは無視)
+		//   走り: runStick 以上で走り出し、runExit を下回って runGrace 秒たつまで走り続ける
+		const float stickLength = std::sqrt(lx * lx + ly * ly);
+		stickMoving_ = stickMoving_ ? stickLength >= settings_.input.moveExit : stickLength >= settings_.input.moveEnter;
+		if(stickMoving_){
+			right += lx;
+			forward -= ly; // スティックは下が+
+		}
+		if(stickRunning_){
+			stickDip_ = stickLength >= settings_.input.runExit ? 0.0f : stickDip_ + dt;
+			stickRunning_ = stickDip_ < settings_.input.runGrace;
+		}
+		else{
+			stickRunning_ = stickLength >= settings_.input.runStick;
+			stickDip_ = 0.0f;
+		}
+		run = run || stickRunning_;
 		cameraYaw_ -= rx * settings_.camera.yawSpeed * sensitivity_ * dt;
 		cameraPitch_ = std::clamp(cameraPitch_ + ry * settings_.camera.pitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
 		actionDown = actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
@@ -385,17 +528,16 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
 		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
 	}
-	// 動作確認用: VULKAN_AUTOWALK=1 で、常に前へ進む入力にする。=2 なら、常に右へ(横から見るため)
+	// 動作確認用: VULKAN_AUTOWALK=1 で、常に前へ進む入力にする。=2 なら常に右へ、=3 なら常に左へ(横から見るため)
 	static const char *autoWalk = SDL_getenv("VULKAN_AUTOWALK");
 	if(autoWalk){
-		forward = autoWalk[0] == '2' ? 0.0f : 1.0f;
-		right = autoWalk[0] == '2' ? 1.0f : right;
+		forward = (autoWalk[0] == '2' || autoWalk[0] == '3') ? 0.0f : 1.0f;
+		right = autoWalk[0] == '2' ? 1.0f : autoWalk[0] == '3' ? -1.0f : right;
 	}
 	// 動作確認用: VULKAN_AUTORUN=1 で、スティックを最大に倒した入力にする。=2 なら、Aボタンも押しっぱなし(Fast Run)
 	static const char *autoRun = SDL_getenv("VULKAN_AUTORUN");
 	if(autoRun){
 		run = true;
-		actionDown = actionDown || autoRun[0] == '2';
 	}
 	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
 	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
@@ -429,14 +571,35 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		dz /= length;
 	}
 
+	// シーンが始まったとき(キャラクタ選択のAボタンなど)に押されていたボタンは、いったん離されるまで無いものとして扱う
+	// (押したままゲームが始まると、離したときに「単押し」とみなされて、転がってしまうため)
+	if(!inputArmed_){
+		if(actionDown || attack[0] || attack[1] || attack[2] || attack[3]){
+			actionDown = attack[0] = attack[1] = attack[2] = attack[3] = false;
+		}
+		else{
+			inputArmed_ = true;
+		}
+	}
+	if(autoRun && autoRun[0] == '2'){
+		actionDown = true; // 動作確認用: Aボタンを押しっぱなし
+	}
 	// ボタンの押し始め・離したとき(アクションの開始)
 	const bool busy = isAction(motion_);
 	if(actionDown){
 		actionHeldTime_ += dt;
 	}
-	if(actionHeld_ && !actionDown){
+	if(settings_.input.rollOnPress > 0.5f){
+		if(actionDown && !actionHeld_ && !busy){
+			startAction(MotionRoll, dx, dz); // 押した瞬間に転がり始める
+		}
+		if(!actionDown){
+			actionHeldTime_ = 0.0f;
+		}
+	}
+	else if(actionHeld_ && !actionDown){
 		if(actionHeldTime_ < settings_.input.tapTime && !busy){
-			startAction(MotionRoll, dx, dz); // 単押し
+			startAction(MotionRoll, dx, dz); // 単押し(離したときに転がる)
 		}
 		actionHeldTime_ = 0.0f;
 	}
@@ -461,19 +624,21 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(isAction(motion_)){
 		wanted = motion_;
 		const auto &player = motions_[motion_];
-		if(motion_ == MotionRoll){
-			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance / player->duration() * dt);
-		}
-		const float rate = motion_ == MotionCrouchEnter ? settings_.climb.enterSpeed : motion_ == MotionCrouchExit ? settings_.climb.exitSpeed : 1.0f;
+		const float rate = motion_ == MotionRoll ? settings_.player.rollRate : 1.0f;
+		const float before = motionTime_ / player->duration();
 		motionTime_ += dt * rate;
+		if(motion_ == MotionRoll){
+			// 前へ進むのは、モーションの足の動きに合わせて(足が着いて立ち上がる間は進まない)。飛ばした頭の分は、進む距離に含めない(残りで、全部の距離を進む)
+			const float after = std::min(motionTime_ / player->duration(), 1.0f);
+			const float skipped = rollProgress(std::min(settings_.player.rollStartOffset / player->duration(), 0.5f));
+			const float scale = 1.0f / std::max(1.0f - skipped, 1e-3f);
+			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance * scale * (rollProgress(after) - rollProgress(before)));
+			// 転がり終わって立ち上がる間に、スティックを倒していたら、立ち上がりを切り上げて、そのまま歩き・走りへつなぐ
+			if(length > 0.0f && rollProgress(after) >= settings_.player.rollCancelProgress){
+				motionTime_ = player->duration();
+			}
+		}
 		if(motionTime_ >= player->duration()){
-			if(motion_ == MotionCrouchEnter){
-				climbing_ = true; // しゃがみ終わり: 登り始める
-				climbRelease_ = 0.0f;
-			}
-			else if(motion_ == MotionCrouchExit){
-				climbing_ = false; // 立ち上がり終わり
-			}
 			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走り・登りへ戻る
 			motionTime_ = 0.0f;
 			wanted = MotionIdle;
@@ -482,83 +647,60 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(!isAction(motion_)){
 		float speed = 0.0f;
 		const float climbLimit = movementRules_.maxClimbSlope * 1.05f;
+		// 坂登り: 切り替えではなく、坂の勾配に応じて、登りのモーションを連続的に混ぜる(climbWeight_: 0=歩き・走りだけ、1=登りだけ)。
+		// 勾配が blendLow 以下なら歩き・走り、blendHigh 以上なら登りで、その間はなめらかに混ぜる。登りへは素早く、歩き・走りへはゆっくり戻る。
+		// 勾配は、すぐ前(0.15m)と少し先(0.5m)の、急な方(登り坂だけ)
+		const float near = length > 0.0f ? field::slopeAhead(map_, playerX_, playerZ_, dx, dz, 0.15f) : 0.0f;
 		const float ahead = length > 0.0f ? field::slopeAhead(map_, playerX_, playerZ_, dx, dz) : 0.0f;
-		if(climbing_){
-			// 登っている間: 先が登れる坂のうちは、登り続ける。登れる坂でなくなって(止まる・平らになる)しばらくしたら、立ち上がる
-			const bool keep = length > 0.0f && ahead > movementRules_.maxSlope * settings_.climb.exitSlopeRatio && ahead <= movementRules_.maxClimbSlope;
-			climbRelease_ = keep ? 0.0f : climbRelease_ + dt;
-			if(climbRelease_ >= settings_.climb.exitHold){
-				climbRelease_ = 0.0f;
-				if(motions_[MotionCrouchExit]){
-					startAction(MotionCrouchExit, 0.0f, 0.0f);
-				}
-				else{
-					climbing_ = false;
-				}
-			}
-			else if(length > 0.0f){
-				walking_ = true;
-				wanted = MotionClimb;
-				stepMove(dx, dz, settings_.player.climbSpeed * dt, climbLimit);
-				heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
-				climbSlope_ += (std::max(ahead, 0.0f) - climbSlope_) * std::min(1.0f, 8.0f * dt);
-			}
+		const float slope = std::max({near, ahead, 0.0f});
+		float target = 0.0f;
+		if(motions_[MotionClimb] && length > 0.0f){
+			const float span = std::max(settings_.climb.blendHigh - settings_.climb.blendLow, 1e-3f);
+			const float t = std::clamp((slope - settings_.climb.blendLow) / span, 0.0f, 1.0f);
+			target = t * t * (3.0f - 2.0f * t);
 		}
-		else if(length > 0.0f){
+		const float rate = target > climbWeight_ ? settings_.climb.riseRate : settings_.climb.fallRate;
+		climbWeight_ += (target - climbWeight_) * std::min(1.0f, rate * dt);
+		if(length > 0.0f){
+			climbSlope_ += (slope - climbSlope_) * std::min(1.0f, 8.0f * dt);
+		}
+		if(length > 0.0f){
 			walking_ = true;
 			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
-			// 向かう先が、歩いては登れない少し急な坂なら、しゃがんでから、ゆっくり登る(これより急な坂は、進めない)
-			const bool climbable = motions_[MotionClimb] && ahead > movementRules_.maxSlope * settings_.player.climbEnter && ahead <= movementRules_.maxClimbSlope;
-			if(climbable){
-				climbSlope_ = ahead;
-				if(motions_[MotionCrouchEnter]){
-					startAction(MotionCrouchEnter, 0.0f, 0.0f);
-					heading_ = std::atan2(dx, dz); // 坂の方を向いてしゃがむ
-				}
-				else{
-					climbing_ = true;
-				}
-				walking_ = false;
+			if(run){
+				wanted = fast ? MotionFastRun : MotionSlowRun;
+				speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
 			}
 			else{
-				if(run){
-					wanted = fast ? MotionFastRun : MotionSlowRun;
-					speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
-				}
-				else{
-					wanted = MotionWalk;
-					speed = settings_.player.walkSpeed * magnitude;
-				}
-				if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
-					wanted = MotionWalk;
-				}
-				if(!stepMove(dx, dz, speed * dt) && motions_[MotionClimb] && ahead > 0.0f){
-					// 歩いては進めなかった(セルごとの勾配が、先の平均より急だったとき): 登れる坂なら、しゃがんでから登る
-					if(stepMove(dx, dz, settings_.player.climbSpeed * dt, climbLimit)){
-						climbSlope_ = ahead;
-						if(motions_[MotionCrouchEnter]){
-							startAction(MotionCrouchEnter, 0.0f, 0.0f);
-						}
-						else{
-							climbing_ = true;
-						}
-					}
-				}
-				heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
+				wanted = MotionWalk;
+				speed = settings_.player.walkSpeed * magnitude;
 			}
-		}
-		if(!isAction(motion_)){
-			// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
-			if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
-				motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
+				wanted = MotionWalk;
 			}
-			motion_ = wanted;
+			// 速さも、登りの混ざり具合に合わせて、歩き・走りの速さから登りの速さへ。急な坂へは、登りの上限(maxClimbSlope)まで進める
+			speed = speed + (settings_.player.climbSpeed - speed) * climbWeight_;
+			if(motions_[MotionClimb]){
+				stepMove(dx, dz, speed * dt, climbLimit);
+			}
+			else{
+				stepMove(dx, dz, speed * dt);
+			}
+			heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
 		}
+		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
+		if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
+			motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+		}
+		motion_ = wanted;
 	}
-	// 坂を登っているとき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
+	else{
+		climbWeight_ += (0.0f - climbWeight_) * std::min(1.0f, 8.0f * dt); // アクション中は、登りの混ざりを戻す
+	}
+	// 坂を登っている(登りが混ざっている)とき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
 	{
-		const float target = motion_ == MotionClimb ? std::atan(climbSlope_) * settings_.climb.tiltFactor : 0.0f;
-		tilt_ += (target - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
+		const float tiltTarget = std::atan(climbSlope_) * settings_.climb.tiltFactor * climbWeight_;
+		tilt_ += (tiltTarget - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
@@ -576,15 +718,30 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	}
 	if(const auto &player = motions_[motion_]){
 		if(!isAction(motion_)){
-			motionTime_ = std::fmod(motionTime_ + dt, player->duration() + 1e-3f); // 立ち・歩き・走りは、ループ
+			motionTime_ = std::fmod(motionTime_ + dt, loopLength(motion_) + 1e-3f); // 立ち・歩き・走りは、ループ
+			applyLooped(motion_, motionTime_, *skeleton, morphs);
 		}
-		player->apply(*skeleton, morphs, std::min(motionTime_, player->duration()));
+		else{
+			player->apply(*skeleton, morphs, std::min(motionTime_, player->duration()));
+		}
+	}
+	// 坂登りの混ぜ: 歩き・走り(いま当てた姿勢)と、登りのモーションの姿勢を、climbWeight_ で混ぜる
+	if(!isAction(motion_) && climbWeight_ > 0.002f && motions_[MotionClimb]){
+		climbTime_ = std::fmod(climbTime_ + dt, loopLength(MotionClimb) + 1e-3f);
+		capturePose(*skeleton, basePose_);
+		applyLooped(MotionClimb, climbTime_, *skeleton, morphs);
+		for(size_t i = 0; i < skeleton->boneCount() && i < basePose_.rotations.size(); ++i){
+			const int bone = static_cast<int>(i);
+			const model::Vec3 &from = basePose_.translations[i], &to = skeleton->boneTranslation(bone);
+			skeleton->setBoneRotation(bone, model::Quat::slerp(basePose_.rotations[i], skeleton->boneRotation(bone), climbWeight_));
+			skeleton->setBoneTranslation(bone, {from.x + (to.x - from.x) * climbWeight_, from.y + (to.y - from.y) * climbWeight_, from.z + (to.z - from.z) * climbWeight_});
+		}
 	}
 	// クロスフェード: モーションが切り替わった瞬間に、直前の姿勢を覚えて、新しい姿勢へ混ぜていく
 	if(appliedMotion_ >= 0 && appliedMotion_ != motion_ && !lastPose_.rotations.empty()){
 		fadeFrom_ = lastPose_;
 		fadeTime_ = 0.0f;
-		fadeDuration_ = isAction(motion_) ? settings_.fade.toAction : isAction(appliedMotion_) ? settings_.fade.fromAction : settings_.fade.locomotion;
+		fadeDuration_ = isAction(motion_) ? settings_.fade.toAction : isAction(appliedMotion_) ? (walking_ ? settings_.fade.fromActionMoving : settings_.fade.fromAction) : settings_.fade.locomotion;
 	}
 	appliedMotion_ = motion_;
 	if(fadeTime_ < fadeDuration_ && fadeFrom_.rotations.size() == skeleton->boneCount()){
@@ -649,6 +806,7 @@ void GameScene::reloadSettings()
 	settings_ = loadGameSettings();
 	const field::FieldSettings fieldSettings = field::loadFieldSettings();
 	movementRules_ = field::MovementRules::fromTiles(tiles_, fieldSettings.maxSlope, fieldSettings.maxClimbSlope);
+	buildRollProfile(); // 転がる進み方(rollMotionTravel を変えたとき)
 	applyModelHeight(modelHeight_); // カメラの高さ・距離(初期値へ戻る)
 }
 

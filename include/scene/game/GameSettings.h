@@ -17,23 +17,36 @@ struct GameSettings
 		float slowRunSpeed = 3.1f;   // Slow Runの速さ(モーションが進む距離2.29m ÷ 0.73秒)
 		float fastRunSpeed = 5.7f;   // Fast Runの速さ(3.02m ÷ 0.53秒)
 		float climbSpeed = 0.5f;     // 歩いて登れない少し急な坂を、ゆっくり登る速さ
-		float climbEnter = 0.85f;    // 先の勾配が、歩ける上限のこの割合を超えたら、登るモーションにする(境目で歩きと登りが入れ替わって止まらないよう、少し手前から)
-		float rollDistance = 4.5f;   // Stand To Rollで前へ転がる距離(モーションの長さの間に、等速で進む)
+		float rollDistance = 4.5f;   // Stand To Rollで前へ転がる距離
+		float rollStartOffset = 0.2f; // 転がり始めに、モーションの頭(助走・かがみ)をこの秒数(モーションの元の時間)だけ飛ばして、すぐ飛び込む
+		float rollCancelProgress = 0.92f; // 転がって進んだ割合(0〜1)がこれを超えて、立ち上がる間に、スティックを倒していたら、立ち上がりを切り上げて、歩き・走りへつなぐ
+		float rollRate = 2.0f;       // 転がるモーションの再生速度の倍率(1でモーションの元の速さ。大きいほど素早く転がる)
+		float rollMotionTravel = 4.52f; // Stand To Rollのモーションが、元々進む距離(変換時のログの値。進み方の形を求めるのに使う。転がる距離を変えるには rollDistance を変える)
 		float turnSpeed = 12.0f;     // キャラが進む向きへ向く速さ(ラジアン/秒の目安)
 	} player;
 	struct Climb
 	{
 		float tiltFactor = 0.3f;     // 坂を登るとき、キャラを坂の角度のこの割合だけ(0〜1。1で坂に垂直)、坂に沿って傾ける。0で傾けない
 		float tiltSmooth = 8.0f;     // 傾きが目標へ追いつく速さ(1/秒。大きいほど速い)
-		float enterSpeed = 1.0f;     // 登り始めの「しゃがむ」モーション(Standing To Crouched)の再生速度の倍率
-		float exitSpeed = 2.0f;      // 登り終わりの「立ち上がる」モーション(Crouch To Stand)の再生速度の倍率(元が長いので速める)
-		float exitHold = 0.25f;      // 登れる坂でなくなって(止まるか、平らになって)から、立ち上がり始めるまでの待ち(秒。境目で出入りを繰り返さないよう)
-		float exitSlopeRatio = 0.6f; // 登っている間は、先の勾配が、歩ける上限のこの割合を下回るまで、登り続ける(登り始めより低く、境目で出入りしないよう)
+		float blendLow = 0.45f;      // 登りのモーションを混ぜ始める勾配(高さ/距離)。これ以下は、歩き・走りだけ
+		float blendHigh = 0.90f;     // 登りのモーションだけになる勾配。歩ける上限(maxSlope 0.85)あたり。この間は、なめらかに混ぜる
+		float riseRate = 12.0f;      // 勾配が上がったとき、登りの混ざり具合が追いつく速さ(1/秒。大きいほど速い。急な坂へは素早く)
+		float fallRate = 2.5f;       // 勾配が下がったとき、歩き・走りへ戻る速さ(1/秒。小さいほどゆっくり。唐突に立ち上がらないよう、遅め)
 	} climb;
+	struct Motion
+	{
+		float seamThreshold = 2.0f;  // ループする(立ち・歩き・走り・登り)モーションの、最初と最後の姿勢の差(骨の回転の差の合計。ラジアン)がこれを超えたら、折り返しを混ぜてつなぐ
+		float loopBlend = 0.8f;      // その折り返しを混ぜる長さ(秒。モーションの長さの40%まで)。ループの周期が、この分だけ短くなる
+	} motion;
 	struct Input
 	{
-		float runStick = 0.95f;      // 左スティックをこれ以上傾けると「最大」(走る)
+		float runStick = 0.85f;      // 左スティックをこれ以上傾けると「最大」(走り始める)。スティックが最大まで倒れ切らなくても走れるよう、1より低くしてある
+		float runExit = 0.70f;       // 走っている間は、これを下回るまで走り続ける(走り始めより低く、境目で歩きに戻らないよう)
+		float runGrace = 0.12f;      // スティックの値が一瞬 runExit を下回っても、この時間(秒)は走り続ける(スティックの接触不良・ぶれ対策)
+		float moveEnter = 0.25f;     // 左スティックをこれ以上傾けると、歩き出す(それより小さい傾きは、遊びとして無視する)
+		float moveExit = 0.15f;      // 歩いている間は、これを下回るまで歩き続ける
 		float tapTime = 0.25f;       // Aボタンを、これより短く押して離したら単押し(転がる)。これ以上押し続けたら長押し(全力で走る)
+		float rollOnPress = 1.0f;    // 1: Aボタンを押した瞬間に転がり始める(押しっぱなしにしても転がる。その後も押し続けて、スティックを最大にしていれば、Fast Run)。0: 離したときに、単押しなら転がる(長押しは転がらず、Fast Run)
 		float triggerOn = 0.5f;      // L2/R2を押したとみなすトリガーの値
 	} input;
 	struct Camera
@@ -55,7 +68,8 @@ struct GameSettings
 	struct Fade
 	{
 		float toAction = 0.10f;      // クロスフェード: アクション(転がる・攻撃)を始めるとき(反応を遅らせないよう短く)
-		float fromAction = 0.30f;    // アクションが終わって、立ち・歩き・走りへ戻るとき
+		float fromAction = 0.30f;    // アクションが終わって、止まったまま立ち・歩き・走りへ戻るとき
+		float fromActionMoving = 0.15f; // アクションが終わる(切り上げる)とき、スティックを倒していて、そのまま歩き・走りへつなぐとき(短めにして、止まって見えないように)
 		float locomotion = 0.20f;    // 立ち・歩き・走りの間
 	} fade;
 };

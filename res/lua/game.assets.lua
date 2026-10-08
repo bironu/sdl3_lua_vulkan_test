@@ -14,7 +14,5 @@ assets = {
 		"res/motion/Punching Left.vrma",
 		"res/motion/Mma Kick Right High.vrma",
 		"res/motion/Roundhouse Kick.vrma",
-		"res/motion/Standing To Crouched.vrma",
-		"res/motion/Crouch To Stand.vrma",
 	},
 }
