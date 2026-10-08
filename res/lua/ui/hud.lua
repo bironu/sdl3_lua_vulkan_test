@@ -3,7 +3,7 @@
 
 local margin = 24
 local mapSize = 280
-local helpKeys = {"HudHelpTitle", "HudHelpMove", "HudHelpCamera", "HudHelpZoom", "HudHelpMap", "HudHelpQuit"}
+local helpKeys = {"HudHelpTitle", "HudHelpMove", "HudHelpRun", "HudHelpRoll", "HudHelpAttack", "HudHelpCamera", "HudHelpZoom", "HudHelpMap", "HudHelpQuit"}
 local textSize = 28
 local lineHeight = 36
 
@@ -32,7 +32,7 @@ function init()
 
 	-- 左下: 操作説明
 	help = ui.rect()
-	help:setSize(520, lineHeight * #helpKeys + 20)
+	help:setSize(820, lineHeight * #helpKeys + 20)
 	help:setAnchor(0, 1)
 	help:setPivot(0, 1)
 	help:setPos(margin, -margin)

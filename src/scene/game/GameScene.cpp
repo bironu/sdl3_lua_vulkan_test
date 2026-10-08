@@ -21,6 +21,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace game
 {
@@ -49,8 +51,18 @@ float approachAngle(float a, float target, float maxStep)
 namespace
 {
 // モーションのパス(game.assets.lua と同じパス)
-constexpr const char *kWalkMotionPath = "res/motion/Walking.vrma";
-constexpr const char *kIdleMotionPath = "res/motion/VRMA_01.vrma";
+constexpr const char *kMotionPaths[] = {
+	"res/motion/Standing Idle.vrma",   // 立ち
+	"res/motion/Walking.vrma",         // 歩き(左スティックを倒しきらない)
+	"res/motion/Slow Run.vrma",        // 左スティックを最大に倒す
+	"res/motion/Fast Run.vrma",        // Aボタンを押しっぱなし + 左スティックを最大に倒す
+	"res/motion/Climbing Slope.vrma",  // 歩いて登れない少し急な坂へ進む(ゆっくり登る)
+	"res/motion/Stand To Roll.vrma",   // Aボタン単押し
+	"res/motion/Punching Right.vrma",  // R1
+	"res/motion/Punching Left.vrma",   // L1
+	"res/motion/Mma Kick Right High.vrma", // R2
+	"res/motion/Roundhouse Kick.vrma",    // L2
+};
 }
 
 GameScene::GameScene() = default;
@@ -81,6 +93,19 @@ void GameScene::setPaused(bool paused)
 void GameScene::command(const std::string &name, double value)
 {
 	if(name == "resume"){
+		setPaused(false);
+	}
+	else if(name == "respawn"){ // 最初の位置へ戻る(地形の端にはまって動けなくなったとき用)
+		playerX_ = startX_;
+		playerZ_ = startZ_;
+		heading_ = 0.0f;
+		motion_ = MotionIdle;
+		motionTime_ = 0.0f;
+		appliedMotion_ = -1; // フェードしない(急に位置が変わるので)
+		fadeDuration_ = 0.0f;
+		if(player_){
+			player_->resetPhysics(); // 髪やスカートの揺れを、元の位置へ
+		}
 		setPaused(false);
 	}
 	else if(name == "sensitivity"){
@@ -168,6 +193,7 @@ void GameScene::dispatch(const SDL_Event &event)
 void GameScene::onCreate(uint32_t tick)
 {
 	Scene::onCreate(tick);
+	settings_ = loadGameSettings(); // 速さ・カメラ・クロスフェードなどの調整値(res/lua/data/game_settings.lua。F5で読み直す)
 	auto &window = vulkanWindow(*this);
 	auto &res = getResources();
 	window.setScreenSize(static_cast<float>(res.getScreenWidth()), static_cast<float>(res.getScreenHeight()));
@@ -193,10 +219,20 @@ void GameScene::onCreate(uint32_t tick)
 	for(const auto &prop : map_.props()){
 		propRenderer_->preload(map_.propName(prop.prop)); // 置物のモデルは、最初の描画ではなく、ここで読む
 	}
-	movementRules_ = field::MovementRules::fromTiles(tiles_, settings.maxSlope);
+	movementRules_ = field::MovementRules::fromTiles(tiles_, settings.maxSlope, settings.maxClimbSlope);
 	propCollision_.build(map_, [this](const std::string &name){ return propRenderer_->footprint(name); });
 	playerX_ = fieldWidth() * 0.5f; // フィールドの真ん中から始める
 	playerZ_ = fieldDepth() * 0.5f;
+	startX_ = playerX_;
+	startZ_ = playerZ_;
+	// 動作確認用: VULKAN_START=x,z で、開始位置を指定する(最初の位置へ戻るときも、そこへ戻る)
+	if(const char *start = SDL_getenv("VULKAN_START")){
+		float sx = 0.0f, sz = 0.0f;
+		if(std::sscanf(start, "%f,%f", &sx, &sz) == 2){
+			startX_ = playerX_ = sx;
+			startZ_ = playerZ_ = sz;
+		}
+	}
 
 	// プレイヤー: キャラクタ選択画面で選んだキャラ(GameSession)。選択画面がGPU上に作ったモデルがあればそれを引き継ぎ、無ければ(データは読み込み済みなら
 	// キャッシュから)ここで作る。シーンの破棄で、まとめて手放される
@@ -224,18 +260,42 @@ void GameScene::onCreate(uint32_t tick)
 	}
 	player_->setAmbientBoost(0.0f);
 	if(player_->skeleton()){
-		if(const auto walk = resources().animation(kWalkMotionPath)){
-			walkPlayer_ = model::VrmaPlayer::create(walk, player_->data(), *player_->skeleton(), player_->morphs());
-			if(walkPlayer_){
-				walkPlayer_->setInPlace(true); // 前へ進むのはキャラの位置(playerX_/Z_)で行う。モーションは足踏みだけ
+		for(int i = 0; i < MotionCount; ++i){
+			if(const auto animation = resources().animation(kMotionPaths[i])){
+				if(i == MotionRoll){
+					rollAnimation_ = animation;
+					buildRollProfile();
+				}
+				motions_[i] = model::VrmaPlayer::create(animation, player_->data(), *player_->skeleton(), player_->morphs());
+				if(motions_[i]){
+					motions_[i]->setInPlace(true); // 前へ進むのはキャラの位置(playerX_/Z_)で行う。モーションは、その場の動きだけ
+				}
 			}
 		}
-		if(const auto idle = resources().animation(kIdleMotionPath)){
-			idlePlayer_ = model::VrmaPlayer::create(idle, player_->data(), *player_->skeleton(), player_->morphs());
-			if(idlePlayer_){
-				idlePlayer_->setInPlace(true);
+	}
+	// ループのつなぎ目: 最初と最後の姿勢が大きく違う(ループ用に作られていない)モーションを調べる(loopSeam_: 骨の回転の差の合計。ラジアン)。
+	// 差が大きいと、ループの折り返しで姿勢が飛ぶ(登りのモーションが、4秒ごとに唐突に立ち上がって見える原因だった)。そのモーションは、折り返しで混ぜてつなぐ(applyLooped)
+	if(auto *skeleton = player_->skeleton()){
+		for(int m = 0; m < MotionCount; ++m){
+			if(!motions_[m]){
+				continue;
 			}
+			Pose first, last;
+			skeleton->resetPose();
+			motions_[m]->apply(*skeleton, nullptr, 0.0f);
+			capturePose(*skeleton, first);
+			skeleton->resetPose();
+			motions_[m]->apply(*skeleton, nullptr, motions_[m]->duration());
+			capturePose(*skeleton, last);
+			float sum = 0.0f;
+			for(size_t i = 0; i < first.rotations.size(); ++i){
+				const auto &a = first.rotations[i], &b = last.rotations[i];
+				const float d = std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
+				sum += 2.0f * std::acos(d);
+			}
+			loopSeam_[m] = sum;
 		}
+		skeleton->resetPose();
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
@@ -265,6 +325,10 @@ void GameScene::onCreate(uint32_t tick)
 	if(const char *pitch = SDL_getenv("VULKAN_PITCH")){
 		cameraPitch_ = std::clamp(static_cast<float>(SDL_atof(pitch)), kMinPitch, 1.3f);
 	}
+	// 動作確認用: VULKAN_YAW=ラジアン で、カメラの水平の角度の初期値(例: 1.57 で横から)
+	if(const char *yaw = SDL_getenv("VULKAN_YAW")){
+		cameraYaw_ = static_cast<float>(SDL_atof(yaw));
+	}
 	// マウスをウィンドウに取り込んで、視点の回転に使う
 	SDL_SetWindowRelativeMouseMode(window.get(), true);
 	lastTick_ = tick;
@@ -277,58 +341,370 @@ void GameScene::onDestroy(uint32_t tick)
 	Scene::onDestroy(tick);
 }
 
-// 入力に合わせてプレイヤーを動かし、歩き/立ちのモーションを当てる
+void GameScene::capturePose(const model::Skeleton &skeleton, Pose &pose)
+{
+	pose.rotations.resize(skeleton.boneCount());
+	pose.translations.resize(skeleton.boneCount());
+	for(size_t i = 0; i < skeleton.boneCount(); ++i){
+		pose.rotations[i] = skeleton.boneRotation(static_cast<int>(i));
+		pose.translations[i] = skeleton.boneTranslation(static_cast<int>(i));
+	}
+}
+
+// 転がるモーションは、変換のとき、前へ進む分(rollMotionTravel)を、時間に比例して引いてある(その場で転がる形)。
+// 引く前の腰の前後の動き = いまの腰の前後の動き + 引いた分(rollMotionTravel × 時刻の割合)。これが、モーションの足の動きに合った進み方。
+// 常に前へ(戻らない)になるよう、累積の最大を取って、最後を1にそろえる
+void GameScene::buildRollProfile()
+{
+	rollProfile_.clear();
+	const auto &animation = rollAnimation_;
+	if(!animation || animation->hipsTimes.size() < 2 || animation->hipsTimes.size() != animation->hipsTranslations.size()){
+		return;
+	}
+	const auto &times = animation->hipsTimes;
+	const auto &positions = animation->hipsTranslations;
+	const float duration = times.back();
+	const float travel = std::max(settings_.player.rollMotionTravel, 0.01f);
+	constexpr int kSamples = 128;
+	size_t k = 0;
+	float peak = 0.0f;
+	for(int i = 0; i <= kSamples; ++i){
+		const float t = duration * static_cast<float>(i) / kSamples;
+		while(k + 2 < times.size() && times[k + 1] < t){
+			++k;
+		}
+		const float span = std::max(times[k + 1] - times[k], 1e-6f);
+		const float f = std::clamp((t - times[k]) / span, 0.0f, 1.0f);
+		const float z = positions[k].z + (positions[k + 1].z - positions[k].z) * f - positions[0].z;
+		peak = std::max(peak, z + travel * t / std::max(duration, 1e-6f));
+		rollProfile_.push_back(peak);
+	}
+	const float total = std::max(rollProfile_.back(), 1e-4f);
+	for(auto &value : rollProfile_){
+		value = std::clamp(value / total, 0.0f, 1.0f);
+	}
+}
+
+float GameScene::rollProgress(float normalizedTime) const
+{
+	const float t = std::clamp(normalizedTime, 0.0f, 1.0f);
+	if(rollProfile_.size() < 2){
+		return t; // 表が無いときは、等速
+	}
+	const float x = t * static_cast<float>(rollProfile_.size() - 1);
+	const size_t i = std::min(static_cast<size_t>(x), rollProfile_.size() - 2);
+	return rollProfile_[i] + (rollProfile_[i + 1] - rollProfile_[i]) * (x - static_cast<float>(i));
+}
+
+float GameScene::loopLength(int motion) const
+{
+	const auto &player = motions_[motion];
+	if(!player){
+		return 1.0f;
+	}
+	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
+		return player->duration();
+	}
+	return player->duration() - std::min(settings_.motion.loopBlend, player->duration() * 0.4f);
+}
+
+// つなぎ目を混ぜるループ: 周期 L = 長さ - F。時刻 u が 0〜F の間は、(終わり側 L+u の姿勢)から(始め側 u の姿勢)へ混ぜる(u=0 で前の周期の終わりと、u=F で始めの続きと、ちょうどつながる)
+void GameScene::applyLooped(int motion, float time, model::Skeleton &skeleton, model::MorphSet *morphs)
+{
+	const auto &player = motions_[motion];
+	if(!player){
+		return;
+	}
+	const float duration = player->duration();
+	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
+		player->apply(skeleton, morphs, std::min(time, duration));
+		return;
+	}
+	const float overlap = std::min(settings_.motion.loopBlend, duration * 0.4f);
+	const float length = duration - overlap;
+	const float u = std::fmod(time, length);
+	if(u >= overlap){
+		player->apply(skeleton, morphs, u);
+		return;
+	}
+	player->apply(skeleton, morphs, length + u);
+	Pose tail;
+	capturePose(skeleton, tail);
+	skeleton.resetPose();
+	player->apply(skeleton, morphs, u);
+	const float t = u / overlap;
+	const float alpha = t * t * (3.0f - 2.0f * t);
+	for(size_t i = 0; i < skeleton.boneCount(); ++i){
+		const int bone = static_cast<int>(i);
+		const model::Vec3 &from = tail.translations[i], &to = skeleton.boneTranslation(bone);
+		skeleton.setBoneRotation(bone, model::Quat::slerp(tail.rotations[i], skeleton.boneRotation(bone), alpha));
+		skeleton.setBoneTranslation(bone, {from.x + (to.x - from.x) * alpha, from.y + (to.y - from.y) * alpha, from.z + (to.z - from.z) * alpha});
+	}
+}
+
+bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
+{
+	const float beforeX = playerX_, beforeZ = playerZ_;
+	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
+	const float targetX = std::clamp(playerX_ + dirX * distance, settings_.player.radius, fieldWidth() - settings_.player.radius);
+	const float targetZ = std::clamp(playerZ_ + dirZ * distance, settings_.player.radius, fieldDepth() - settings_.player.radius);
+	// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
+	field::moveOnField(map_, movementRules_, settings_.player.radius, playerX_, playerZ_, targetX, targetZ, maxSlope);
+	// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
+	float pushedX = playerX_, pushedZ = playerZ_;
+	if(propCollision_.resolve(pushedX, pushedZ, settings_.player.radius)){
+		pushedX = std::clamp(pushedX, settings_.player.radius, fieldWidth() - settings_.player.radius);
+		pushedZ = std::clamp(pushedZ, settings_.player.radius, fieldDepth() - settings_.player.radius);
+		float checkX = playerX_, checkZ = playerZ_;
+		if(field::moveOnField(map_, movementRules_, settings_.player.radius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
+			playerX_ = pushedX;
+			playerZ_ = pushedZ;
+		}
+	}
+	return playerX_ != beforeX || playerZ_ != beforeZ;
+}
+
+// アクション(転がる・攻撃)を始める。モーションが無ければ何もしない。転がるときは、入力の向き(dirX, dirZ。無入力なら0)へ向いてから転がる
+void GameScene::startAction(int motion, float dirX, float dirZ)
+{
+	if(!motions_[motion]){
+		return;
+	}
+	if(motion == MotionRoll){
+		if(dirX != 0.0f || dirZ != 0.0f){
+			heading_ = std::atan2(dirX, dirZ);
+		}
+		rollDirX_ = std::sin(heading_);
+		rollDirZ_ = std::cos(heading_);
+	}
+	motion_ = motion;
+	motionTime_ = 0.0f;
+	if(motion == MotionRoll){
+		motionTime_ = std::min(settings_.player.rollStartOffset, motions_[motion]->duration() * 0.5f); // 助走・かがみを飛ばして、すぐ飛び込む
+	}
+}
+
+// 入力に合わせてプレイヤーを動かし、モーションを当てる:
+//   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
+//   歩いて登れない少し急な坂(maxSlope〜maxClimbSlope)へ進む: Climbing Slope(ゆっくり登る)
+//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
+//   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
 void GameScene::updatePlayer(float dt, uint32_t tick)
 {
 	const bool *keys = SDL_GetKeyboardState(nullptr);
 	float right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
 	float forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
+	bool run = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+	bool actionDown = keys[SDL_SCANCODE_SPACE];
+	bool attack[4] = {keys[SDL_SCANCODE_X] != 0, keys[SDL_SCANCODE_V] != 0, keys[SDL_SCANCODE_Z] != 0, keys[SDL_SCANCODE_C] != 0}; // R1 R2 L1 L2
 	// ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックでカメラ(視点)を回す
 	if(const auto pad = getResources().getGamepad()){
-		constexpr float kCameraYawSpeed = 2.6f;   // 右スティックを倒しきったときの、水平の回転の速さ(ラジアン/秒)
-		constexpr float kCameraPitchSpeed = 1.6f; // 同、上下
 		float lx, ly, rx, ry;
 		pad->leftStick(lx, ly);
 		pad->rightStick(rx, ry);
-		right += lx;
-		forward -= ly; // スティックは下が+
-		cameraYaw_ -= rx * kCameraYawSpeed * sensitivity_ * dt;
-		cameraPitch_ = std::clamp(cameraPitch_ + ry * kCameraPitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
+		// 歩き出し・走り出しに遊びを持たせる(スティックが最大まで倒れ切らない・値がぶれる、への対策):
+		//   歩き: moveEnter 以上で動き出し、moveExit を下回るまで動き続ける(小さい傾きは無視)
+		//   走り: runStick 以上で走り出し、runExit を下回って runGrace 秒たつまで走り続ける
+		const float stickLength = std::sqrt(lx * lx + ly * ly);
+		stickMoving_ = stickMoving_ ? stickLength >= settings_.input.moveExit : stickLength >= settings_.input.moveEnter;
+		if(stickMoving_){
+			right += lx;
+			forward -= ly; // スティックは下が+
+		}
+		if(stickRunning_){
+			stickDip_ = stickLength >= settings_.input.runExit ? 0.0f : stickDip_ + dt;
+			stickRunning_ = stickDip_ < settings_.input.runGrace;
+		}
+		else{
+			stickRunning_ = stickLength >= settings_.input.runStick;
+			stickDip_ = 0.0f;
+		}
+		run = run || stickRunning_;
+		cameraYaw_ -= rx * settings_.camera.yawSpeed * sensitivity_ * dt;
+		cameraPitch_ = std::clamp(cameraPitch_ + ry * settings_.camera.pitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
+		actionDown = actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
+		attack[0] = attack[0] || pad->button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+		attack[1] = attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > settings_.input.triggerOn;
+		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
 	}
-	static const bool autoWalk = SDL_getenv("VULKAN_AUTOWALK") != nullptr; // 動作確認用: 常に前へ進む入力にする
-	forward = autoWalk ? 1.0f : forward;
+	// 動作確認用: VULKAN_AUTOWALK=1 で、常に前へ進む入力にする。=2 なら常に右へ、=3 なら常に左へ(横から見るため)
+	static const char *autoWalk = SDL_getenv("VULKAN_AUTOWALK");
+	if(autoWalk){
+		forward = (autoWalk[0] == '2' || autoWalk[0] == '3') ? 0.0f : 1.0f;
+		right = autoWalk[0] == '2' ? 1.0f : autoWalk[0] == '3' ? -1.0f : right;
+	}
+	// 動作確認用: VULKAN_AUTORUN=1 で、スティックを最大に倒した入力にする。=2 なら、Aボタンも押しっぱなし(Fast Run)
+	static const char *autoRun = SDL_getenv("VULKAN_AUTORUN");
+	if(autoRun){
+		run = true;
+	}
+	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
+	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
+	if(autoAction){
+		const std::string all(autoAction);
+		std::vector<std::pair<std::string, int>> actions;
+		for(size_t start = 0; start < all.size();){
+			size_t end = all.find(',', start);
+			end = end == std::string::npos ? all.size() : end;
+			const std::string spec = all.substr(start, end - start);
+			const auto at = spec.find('@');
+			if(at != std::string::npos){
+				actions.emplace_back(spec.substr(0, at), std::atoi(spec.c_str() + at + 1));
+			}
+			start = end + 1;
+		}
+		while(autoActionDone_ < actions.size() && static_cast<int>(tick - startTick_) >= actions[autoActionDone_].second){
+			const std::string &name = actions[autoActionDone_++].first;
+			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "kh" ? MotionKickHigh : MotionRoundhouse;
+		}
+	}
 	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
 	const float fx = -std::sin(cameraYaw_), fz = -std::cos(cameraYaw_);
 	const float rx = std::cos(cameraYaw_), rz = -std::sin(cameraYaw_);
 	float dx = fx * forward + rx * right;
 	float dz = fz * forward + rz * right;
 	const float length = std::sqrt(dx * dx + dz * dz);
-	walking_ = length > 0.0f;
-	if(walking_){
-		const float magnitude = std::min(length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
+	const float magnitude = std::min(length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
+	if(length > 0.0f){
 		dx /= length;
 		dz /= length;
-		// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
-		const float targetX = std::clamp(playerX_ + dx * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldWidth() - kPlayerRadius);
-		const float targetZ = std::clamp(playerZ_ + dz * kWalkSpeed * magnitude * dt, kPlayerRadius, fieldDepth() - kPlayerRadius);
-		// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
-		field::moveOnField(map_, movementRules_, kPlayerRadius, playerX_, playerZ_, targetX, targetZ);
-		// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
-		float pushedX = playerX_, pushedZ = playerZ_;
-		if(propCollision_.resolve(pushedX, pushedZ, kPlayerRadius)){
-			pushedX = std::clamp(pushedX, kPlayerRadius, fieldWidth() - kPlayerRadius);
-			pushedZ = std::clamp(pushedZ, kPlayerRadius, fieldDepth() - kPlayerRadius);
-			float checkX = playerX_, checkZ = playerZ_;
-			if(field::moveOnField(map_, movementRules_, kPlayerRadius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
-				playerX_ = pushedX;
-				playerZ_ = pushedZ;
+	}
+
+	// シーンが始まったとき(キャラクタ選択のAボタンなど)に押されていたボタンは、いったん離されるまで無いものとして扱う
+	// (押したままゲームが始まると、離したときに「単押し」とみなされて、転がってしまうため)
+	if(!inputArmed_){
+		if(actionDown || attack[0] || attack[1] || attack[2] || attack[3]){
+			actionDown = attack[0] = attack[1] = attack[2] = attack[3] = false;
+		}
+		else{
+			inputArmed_ = true;
+		}
+	}
+	if(autoRun && autoRun[0] == '2'){
+		actionDown = true; // 動作確認用: Aボタンを押しっぱなし
+	}
+	// ボタンの押し始め・離したとき(アクションの開始)
+	const bool busy = isAction(motion_);
+	if(actionDown){
+		actionHeldTime_ += dt;
+	}
+	if(settings_.input.rollOnPress > 0.5f){
+		if(actionDown && !actionHeld_ && !busy){
+			startAction(MotionRoll, dx, dz); // 押した瞬間に転がり始める
+		}
+		if(!actionDown){
+			actionHeldTime_ = 0.0f;
+		}
+	}
+	else if(actionHeld_ && !actionDown){
+		if(actionHeldTime_ < settings_.input.tapTime && !busy){
+			startAction(MotionRoll, dx, dz); // 単押し(離したときに転がる)
+		}
+		actionHeldTime_ = 0.0f;
+	}
+	actionHeld_ = actionDown;
+	static const int kAttackMotions[4] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionRoundhouse};
+	for(int i = 0; i < 4; ++i){
+		if(attack[i] && !actionPrev_[i] && !isAction(motion_)){
+			startAction(kAttackMotions[i], 0.0f, 0.0f);
+		}
+		actionPrev_[i] = attack[i];
+	}
+	if(pendingAuto_ >= 0){
+		if(!isAction(motion_)){
+			startAction(pendingAuto_, dx, dz);
+		}
+		pendingAuto_ = -1;
+	}
+
+	// 動き: アクション中は、転がるときだけ前へ進む(坂の登り始め・終わりのモーションの間は、止まる)。それ以外は、入力の向きへ
+	walking_ = false;
+	int wanted = MotionIdle;
+	if(isAction(motion_)){
+		wanted = motion_;
+		const auto &player = motions_[motion_];
+		const float rate = motion_ == MotionRoll ? settings_.player.rollRate : 1.0f;
+		const float before = motionTime_ / player->duration();
+		motionTime_ += dt * rate;
+		if(motion_ == MotionRoll){
+			// 前へ進むのは、モーションの足の動きに合わせて(足が着いて立ち上がる間は進まない)。飛ばした頭の分は、進む距離に含めない(残りで、全部の距離を進む)
+			const float after = std::min(motionTime_ / player->duration(), 1.0f);
+			const float skipped = rollProgress(std::min(settings_.player.rollStartOffset / player->duration(), 0.5f));
+			const float scale = 1.0f / std::max(1.0f - skipped, 1e-3f);
+			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance * scale * (rollProgress(after) - rollProgress(before)));
+			// 転がり終わって立ち上がる間に、スティックを倒していたら、立ち上がりを切り上げて、そのまま歩き・走りへつなぐ
+			if(length > 0.0f && rollProgress(after) >= settings_.player.rollCancelProgress){
+				motionTime_ = player->duration();
 			}
 		}
-		heading_ = approachAngle(heading_, std::atan2(dx, dz), kTurnSpeed * dt);
+		if(motionTime_ >= player->duration()){
+			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走り・登りへ戻る
+			motionTime_ = 0.0f;
+			wanted = MotionIdle;
+		}
+	}
+	if(!isAction(motion_)){
+		float speed = 0.0f;
+		const float climbLimit = movementRules_.maxClimbSlope * 1.05f;
+		// 坂登り: 切り替えではなく、坂の勾配に応じて、登りのモーションを連続的に混ぜる(climbWeight_: 0=歩き・走りだけ、1=登りだけ)。
+		// 勾配が blendLow 以下なら歩き・走り、blendHigh 以上なら登りで、その間はなめらかに混ぜる。登りへは素早く、歩き・走りへはゆっくり戻る。
+		// 勾配は、すぐ前(0.15m)と少し先(0.5m)の、急な方(登り坂だけ)
+		const float near = length > 0.0f ? field::slopeAhead(map_, playerX_, playerZ_, dx, dz, 0.15f) : 0.0f;
+		const float ahead = length > 0.0f ? field::slopeAhead(map_, playerX_, playerZ_, dx, dz) : 0.0f;
+		const float slope = std::max({near, ahead, 0.0f});
+		float target = 0.0f;
+		if(motions_[MotionClimb] && length > 0.0f){
+			const float span = std::max(settings_.climb.blendHigh - settings_.climb.blendLow, 1e-3f);
+			const float t = std::clamp((slope - settings_.climb.blendLow) / span, 0.0f, 1.0f);
+			target = t * t * (3.0f - 2.0f * t);
+		}
+		const float rate = target > climbWeight_ ? settings_.climb.riseRate : settings_.climb.fallRate;
+		climbWeight_ += (target - climbWeight_) * std::min(1.0f, rate * dt);
+		if(length > 0.0f){
+			climbSlope_ += (slope - climbSlope_) * std::min(1.0f, 8.0f * dt);
+		}
+		if(length > 0.0f){
+			walking_ = true;
+			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
+			if(run){
+				wanted = fast ? MotionFastRun : MotionSlowRun;
+				speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
+			}
+			else{
+				wanted = MotionWalk;
+				speed = settings_.player.walkSpeed * magnitude;
+			}
+			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
+				wanted = MotionWalk;
+			}
+			// 速さも、登りの混ざり具合に合わせて、歩き・走りの速さから登りの速さへ。急な坂へは、登りの上限(maxClimbSlope)まで進める
+			speed = speed + (settings_.player.climbSpeed - speed) * climbWeight_;
+			if(motions_[MotionClimb]){
+				stepMove(dx, dz, speed * dt, climbLimit);
+			}
+			else{
+				stepMove(dx, dz, speed * dt);
+			}
+			heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
+		}
+		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
+		if(wanted != motion_ && motions_[wanted] && motions_[motion_]){
+			motionTime_ = motionTime_ / motions_[motion_]->duration() * motions_[wanted]->duration();
+		}
+		motion_ = wanted;
+	}
+	else{
+		climbWeight_ += (0.0f - climbWeight_) * std::min(1.0f, 8.0f * dt); // アクション中は、登りの混ざりを戻す
+	}
+	// 坂を登っている(登りが混ざっている)とき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
+	{
+		const float tiltTarget = std::atan(climbSlope_) * settings_.climb.tiltFactor * climbWeight_;
+		tilt_ += (tiltTarget - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
 	}
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
-	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)));
+	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)) * geo::Quaternionf::createRotater(-tilt_, geo::Vector3f(1.0f, 0.0f, 0.0f)));
 
 	// モーション
 	auto *skeleton = player_->skeleton();
@@ -340,16 +716,50 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(morphs){
 		morphs->resetWeights();
 	}
-	if(walking_ && walkPlayer_){
-		walkTime_ = std::fmod(walkTime_ + dt, walkPlayer_->duration() + 1e-3f);
-		walkPlayer_->apply(*skeleton, morphs, walkTime_);
+	if(const auto &player = motions_[motion_]){
+		if(!isAction(motion_)){
+			motionTime_ = std::fmod(motionTime_ + dt, loopLength(motion_) + 1e-3f); // 立ち・歩き・走りは、ループ
+			applyLooped(motion_, motionTime_, *skeleton, morphs);
+		}
+		else{
+			player->apply(*skeleton, morphs, std::min(motionTime_, player->duration()));
+		}
 	}
-	else if(!walking_ && idlePlayer_){
-		idleTime_ = std::fmod(idleTime_ + dt, idlePlayer_->duration() + 1e-3f);
-		idlePlayer_->apply(*skeleton, morphs, idleTime_);
+	// 坂登りの混ぜ: 歩き・走り(いま当てた姿勢)と、登りのモーションの姿勢を、climbWeight_ で混ぜる
+	if(!isAction(motion_) && climbWeight_ > 0.002f && motions_[MotionClimb]){
+		climbTime_ = std::fmod(climbTime_ + dt, loopLength(MotionClimb) + 1e-3f);
+		capturePose(*skeleton, basePose_);
+		applyLooped(MotionClimb, climbTime_, *skeleton, morphs);
+		for(size_t i = 0; i < skeleton->boneCount() && i < basePose_.rotations.size(); ++i){
+			const int bone = static_cast<int>(i);
+			const model::Vec3 &from = basePose_.translations[i], &to = skeleton->boneTranslation(bone);
+			skeleton->setBoneRotation(bone, model::Quat::slerp(basePose_.rotations[i], skeleton->boneRotation(bone), climbWeight_));
+			skeleton->setBoneTranslation(bone, {from.x + (to.x - from.x) * climbWeight_, from.y + (to.y - from.y) * climbWeight_, from.z + (to.z - from.z) * climbWeight_});
+		}
 	}
+	// クロスフェード: モーションが切り替わった瞬間に、直前の姿勢を覚えて、新しい姿勢へ混ぜていく
+	if(appliedMotion_ >= 0 && appliedMotion_ != motion_ && !lastPose_.rotations.empty()){
+		fadeFrom_ = lastPose_;
+		fadeTime_ = 0.0f;
+		fadeDuration_ = isAction(motion_) ? settings_.fade.toAction : isAction(appliedMotion_) ? (walking_ ? settings_.fade.fromActionMoving : settings_.fade.fromAction) : settings_.fade.locomotion;
+	}
+	appliedMotion_ = motion_;
+	if(fadeTime_ < fadeDuration_ && fadeFrom_.rotations.size() == skeleton->boneCount()){
+		fadeTime_ += dt;
+		const float t = std::clamp(fadeTime_ / fadeDuration_, 0.0f, 1.0f);
+		const float alpha = t * t * (3.0f - 2.0f * t); // なめらかに始まり、なめらかに終わる
+		for(size_t i = 0; i < skeleton->boneCount(); ++i){
+			const int bone = static_cast<int>(i);
+			const model::Quat &toRotation = skeleton->boneRotation(bone);
+			const model::Vec3 &toTranslation = skeleton->boneTranslation(bone);
+			const model::Vec3 &fromTranslation = fadeFrom_.translations[i];
+			skeleton->setBoneRotation(bone, model::Quat::slerp(fadeFrom_.rotations[i], toRotation, alpha));
+			skeleton->setBoneTranslation(bone, {fromTranslation.x + (toTranslation.x - fromTranslation.x) * alpha,
+				fromTranslation.y + (toTranslation.y - fromTranslation.y) * alpha, fromTranslation.z + (toTranslation.z - fromTranslation.z) * alpha});
+		}
+	}
+	capturePose(*skeleton, lastPose_);
 	player_->updatePose(dt);
-	(void)tick;
 }
 
 void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
@@ -371,6 +781,7 @@ void GameScene::updateHud(float dt, uint32_t tick)
 		SDL_Log("hud: reloading %s", kHudScript);
 		getResources().reload();
 		hud_->load(kHudScript);
+		reloadSettings();
 	}
 	if(dt > 0.0f){
 		const float instant = 1.0f / dt;
@@ -389,20 +800,32 @@ void GameScene::updateHud(float dt, uint32_t tick)
 	hud_->update(dt, static_cast<float>(tick) * 0.001f);
 }
 
+void GameScene::reloadSettings()
+{
+	SDL_Log("game: reloading settings");
+	settings_ = loadGameSettings();
+	const field::FieldSettings fieldSettings = field::loadFieldSettings();
+	movementRules_ = field::MovementRules::fromTiles(tiles_, fieldSettings.maxSlope, fieldSettings.maxClimbSlope);
+	buildRollProfile(); // 転がる進み方(rollMotionTravel を変えたとき)
+	applyModelHeight(modelHeight_); // カメラの高さ・距離(初期値へ戻る)
+}
+
 void GameScene::applyModelHeight(float height)
 {
 	// モデルのメートルの単位で、背が極端に小さい/大きい(単位が違う・頂点が無い)ときは、基準の高さで
-	modelHeight_ = (height > 0.3f && height < 10.0f) ? height : kReferenceHeight;
-	cameraHeight_ = kCameraHeightRatio * modelHeight_;
-	minEyeHeight_ = kMinEyeHeightRatio * modelHeight_;
-	headTop_ = kHeadTopRatio * modelHeight_;
-	minCameraDistance_ = kMinDistanceRatio * modelHeight_;
-	maxCameraDistance_ = kMaxDistanceRatio * modelHeight_;
-	cameraDistance_ = kDefaultDistanceRatio * modelHeight_;
+	const float reference = settings_.camera.referenceHeight;
+	modelHeight_ = (height > 0.3f && height < 10.0f) ? height : reference;
+	const float scale = modelHeight_ / reference;
+	cameraHeight_ = settings_.camera.height * scale;
+	minEyeHeight_ = settings_.camera.minEyeHeight * scale;
+	headTop_ = settings_.camera.headTop * scale;
+	minCameraDistance_ = settings_.camera.minDistance * scale;
+	maxCameraDistance_ = settings_.camera.maxDistance * scale;
+	cameraDistance_ = settings_.camera.distance * scale;
 	SDL_Log("Player height %.2f m (camera height %.2f, distance %.2f)", modelHeight_, cameraHeight_, cameraDistance_);
 }
 
-void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up) const
+void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up)
 {
 	const float sinYaw = std::sin(cameraYaw_), cosYaw = std::cos(cameraYaw_);
 	const geo::Vector3f head(playerX_, playerY_ + cameraHeight_, playerZ_);
@@ -414,16 +837,46 @@ void GameScene::computeCamera(geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Ve
 		lookAt = head;
 	}
 	else{
-		// 地面に潜りそうなとき: 地面すれすれの位置から、体に沿った(外へふくらんだ)弧を描いて、頭のてっぺんの上まで上がる。
-		// 進むほど(u: 0〜1)、見る先は頭から真上へ移り(終盤に大きく)、最後は真上を向く
+		// 地面に潜りそうなとき(u: 0〜1で進む): まず、地面すれすれの低い位置のまま、体のすぐ近く(bodyDistance)まで寄る(前半。見る先は頭のまま)。
+		// 近くへ寄ってから、体に沿った弧を描いて、頭のてっぺんの上まで上がる(後半)。上がるにつれて、見る先は頭から真上へ移り(終盤に大きく)、最後は真上を向く
 		const float u = std::clamp((groundPitch - cameraPitch_) / (groundPitch - kMinPitch), 0.0f, 1.0f);
-		const float theta = u * 1.5707963f;
+		const float approach = std::clamp(u / settings_.camera.approachFraction, 0.0f, 1.0f); // 寄る進み具合
+		const float rise = std::clamp((u - settings_.camera.approachFraction) / (1.0f - settings_.camera.approachFraction), 0.0f, 1.0f); // 上がる進み具合
+		const float theta = rise * 1.5707963f;
 		const float startDistance = std::cos(groundPitch) * cameraDistance_;
-		const float horizontal = startDistance * std::cos(theta);
+		const float bodyDistance = std::min(settings_.camera.bodyDistance * modelHeight_ / settings_.camera.referenceHeight, startDistance);
+		const float easedApproach = approach * approach * (3.0f - 2.0f * approach);
+		const float horizontal = (startDistance + (bodyDistance - startDistance) * easedApproach) * std::cos(theta);
 		const float height = playerY_ + minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
 		eye = geo::Vector3f(playerX_ + sinYaw * horizontal, height, playerZ_ + cosYaw * horizontal);
-		const float look = u * u; // 見る先が頭から離れるのは終盤から(途中までは、体が視界に残る)
+		const float look = rise * rise; // 見る先が頭から離れるのは、上がる後半の終盤から(それまでは、体が視界に残る)
 		lookAt = head + (eye + geo::Vector3f(0.0f, 4.0f, 0.0f) - head) * look;
+	}
+	// 地形: 頭からカメラへの線が地面(丘・坂)に当たるなら、当たる手前まで引き寄せる。縮むときはすぐ、戻るときはなめらかに(カメラが震えないよう)。
+	// 引き寄せたあとも、カメラの下の地面から minEyeHeight_ 以上は高くする
+	{
+		const geo::Vector3f arm = eye - head;
+		const float armLength = std::sqrt(arm.getX() * arm.getX() + arm.getY() * arm.getY() + arm.getZ() * arm.getZ());
+		float wanted = 1.0f;
+		if(armLength > 1e-4f){
+			const float origin[3] = {head.getX(), head.getY(), head.getZ()};
+			const float direction[3] = {arm.getX() / armLength, arm.getY() / armLength, arm.getZ() / armLength};
+			float t = 0.0f, hit[3];
+			if(map_.raycast(origin, direction, armLength, t, hit)){
+				wanted = std::clamp((t - minEyeHeight_) / armLength, std::min(settings_.camera.minArm / armLength, 1.0f), 1.0f);
+			}
+		}
+		if(wanted < cameraArm_){
+			cameraArm_ = wanted;
+		}
+		else{
+			cameraArm_ += (wanted - cameraArm_) * std::min(1.0f, settings_.camera.armRecover * dt);
+		}
+		eye = head + arm * cameraArm_;
+		const float floorY = map_.heightAt(eye.getX(), eye.getZ()) + minEyeHeight_;
+		if(eye.getY() < floorY){
+			eye = geo::Vector3f(eye.getX(), floorY, eye.getZ());
+		}
 	}
 	// 上向き: 見ている向きの仰角から。真上を見ても、(正面の逆の向きが画面の上になるよう)つぶれない
 	const geo::Vector3f forward = geo::Vector3f::normalize(lookAt - eye);
@@ -448,6 +901,12 @@ bool GameScene::onIdle(uint32_t tick)
 		autoPauseDone_ = true;
 		setPaused(true);
 	}
+	// 動作確認用: VULKAN_AUTORELOAD=ミリ秒 で、その時間後に、F5と同じ読み直しをする
+	static const char *autoReload = SDL_getenv("VULKAN_AUTORELOAD");
+	if(autoReload && !autoReloadDone_ && tick >= static_cast<uint32_t>(std::atoi(autoReload)) + startTick_){
+		autoReloadDone_ = true;
+		reloadHud_ = true;
+	}
 	static const char *autoMouse = SDL_getenv("VULKAN_AUTOMOUSE");
 	if(autoMouse && paused_ && !autoMouseDone_){
 		float mx = 0.0f, my = 0.0f;
@@ -467,7 +926,7 @@ bool GameScene::onIdle(uint32_t tick)
 
 	// 三人称のカメラ
 	geo::Vector3f eye, lookAt, up;
-	computeCamera(eye, lookAt, up);
+	computeCamera(dt, eye, lookAt, up);
 	const auto view = geo::createLookAt<float>(eye, lookAt, up);
 	const auto proj = vk_::createPerspective(kPi / 3.0f, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 200.0f);
 	window.setCameraPosition(eye);

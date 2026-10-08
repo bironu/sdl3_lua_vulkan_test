@@ -23,6 +23,7 @@ struct FieldSettings
 {
 	std::string tiles = "res/lua/data/field_tiles.lua";
 	std::string field = "res/field/field01.fld";
+	float maxClimbSlope = 1.6f; // 登れる(ゆっくり登る)勾配の上限(約58度)。maxSlopeより急で、これまでの間は「登れない少し急な坂」を、ゆっくり登る。これより急な所へは進めない
 	float maxSlope = 0.85f; // 歩いて登れる地面の勾配の上限(高さ/水平の距離。0.85で約40度)。これより急な所へは進めない
 };
 // 設定を読む(読めない項目は既定のまま)

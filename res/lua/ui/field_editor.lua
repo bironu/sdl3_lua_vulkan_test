@@ -1,7 +1,7 @@
 -- フィールドエディタの画面: 上にモード(タイル/高さ/置物)、下にモードごとのパレット(タイル・高さの道具・置物の一覧。クリックか数字キーで選ぶ)、
 -- 左上に情報、右上に操作説明。Escでメニュー(保存・読み直し・全面を塗る・終了)。
 -- C++(FieldEditorScene)から world.mode / brush / tool / radius / propSel / propPage / propPages / propYaw / propScale / propLift / propCount /
--- cellX / cellZ / hoverHeight / dirty / saved / imported / width / depth / fps と、world.strings.prop1〜prop10(ページの置物の名前)が渡される。命令は game.command(名前, 値)
+-- cellX / cellZ / hoverHeight / slopes / rampSlope / dirty / saved / imported / width / depth / fps と、world.strings.prop1〜prop10(ページの置物の名前)が渡される。命令は game.command(名前, 値)
 
 loadScript("res/lua/data/field_tiles.lua") -- tiles (ゲームと同じ定義)
 
@@ -12,7 +12,7 @@ local toolBoxes = {}
 local propBoxes, propTexts = {}, {}
 local modeButtons = {}
 local modeKeys = {"ModeTile", "ModeHeight", "ModeProp"}
-local toolKeys = {"ToolRaise", "ToolLower", "ToolSmooth", "ToolFlatten"}
+local toolKeys = {"ToolRaise", "ToolLower", "ToolSmooth", "ToolFlatten", "ToolRamp"}
 local helpKeys = {
 	{"EditHelpPaint", "EditHelpRadius"},
 	{"EditHelpSculpt", "EditHelpRadius"},
@@ -23,7 +23,7 @@ local propSlots = 10
 local tilePanel, toolPanel, propPanel
 local helpTexts = {}
 local pageText
-local brushText, cellText, stateText, detailText, toast
+local brushText, cellText, stateText, detailText, toast, legend
 local lastSaved = world.saved or 0
 local lastImported = world.imported or 0
 local shown = {mode = -1, brush = -1, tool = -1, propSel = -99, propPage = -1}
@@ -133,7 +133,7 @@ function init()
 	end
 
 	-- 下: 高さの道具
-	local toolWidth = 300
+	local toolWidth = 240
 	toolPanel = panel(#toolKeys * (toolWidth + gap) + gap, 100 + gap)
 	for i, key in ipairs(toolKeys) do
 		local box = ui.rect()
@@ -199,6 +199,32 @@ function init()
 	stateText = ui.text("", {size = 28, bitmap = true})
 	stateText:setPos(14, 142)
 	info:add(stateText)
+
+	-- 勾配の凡例(Vキーで勾配を表示しているときだけ)
+	legend = ui.rect()
+	legend:setSize(340, 150)
+	legend:setPos(24, 310)
+	legend:setColor(0, 0, 0, 130)
+	legend:setVisible(false)
+	root:add(legend)
+	local legendItems = {
+		{key = "EditSlopeWalk", color = {51, 230, 77}},
+		{key = "EditSlopeClimb", color = {255, 217, 26}},
+		{key = "EditSlopeBlocked", color = {255, 51, 51}},
+		{key = "EditSlopeTile", color = {166, 64, 242}},
+	}
+	for i, item in ipairs(legendItems) do
+		local box = ui.rect()
+		box:setSize(26, 26)
+		box:setPos(14 + 13, 12 + (i - 1) * 34 + 13)
+		box:setPivot(0.5, 0.5)
+		box:setColor(item.color[1], item.color[2], item.color[3], 255)
+		legend:add(box)
+		local label = ui.text(nil, {size = 24, key = item.key})
+		label:setColor(235, 235, 235)
+		label:setPos(54, 10 + (i - 1) * 34)
+		legend:add(label)
+	end
 
 	-- 右上: 操作説明(モードごとの2行 + 共通)
 	local help = ui.rect()
@@ -311,7 +337,11 @@ function update(dt, time)
 		detailText:setText(string.format("R %d", world.radius))
 	elseif mode == 1 then
 		brushText:setText("[" .. (tool + 1) .. "] " .. i18n.t(toolKeys[tool + 1]))
-		detailText:setText(string.format("R %d", world.radius))
+		if tool == 4 and math.abs(world.rampSlope) > 0 then
+			detailText:setText(string.format("R %d  Slope %.2f", world.radius, math.abs(world.rampSlope)))
+		else
+			detailText:setText(string.format("R %d", world.radius))
+		end
 	else
 		local name = world.strings["prop" .. (propSel + 1)] or ""
 		brushText:setText(name ~= "" and name or "-")
@@ -323,6 +353,7 @@ function update(dt, time)
 		cellText:setText("-")
 	end
 	stateText:setText(string.format("%dx%d  Obj %d  %s  FPS %d", world.width, world.depth, world.propCount, world.dirty > 0 and "*" or "", math.floor(world.fps + 0.5)))
+	legend:setVisible((world.slopes or 0) > 0)
 	if world.saved ~= lastSaved then
 		lastSaved = world.saved
 		showToast("EditSaved")
@@ -360,6 +391,8 @@ function onKey(key, down)
 		setMode(2)
 	elseif key == "C" then
 		game.command("collision")
+	elseif key == "V" then
+		game.command("slopes")
 	elseif key == "Z" then
 		game.command("undo")
 	elseif key == "[" then
