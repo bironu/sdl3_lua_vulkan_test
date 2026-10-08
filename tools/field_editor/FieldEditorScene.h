@@ -30,7 +30,7 @@ public:
 	static constexpr const char *kUiScript = "res/lua/ui/field_editor.lua";
 	static constexpr int kPropsPerPage = 10;
 	enum Mode { ModeTile = 0, ModeHeight = 1, ModeProp = 2 };
-	enum Tool { ToolRaise = 0, ToolLower = 1, ToolSmooth = 2, ToolFlatten = 3, ToolCount = 4 };
+	enum Tool { ToolRaise = 0, ToolLower = 1, ToolSmooth = 2, ToolFlatten = 3, ToolRamp = 4, ToolCount = 5 };
 
 	FieldEditorScene();
 	~FieldEditorScene() override;
@@ -73,6 +73,11 @@ private:
 	void importFile(const std::string &path);
 	std::string filePath() const;
 	void drawField(const geo::Matrix4x4f &viewProj);
+	void rebuildSlopeMesh();   // 勾配の表示(Vキー)のメッシュを、いまの地形から作る
+	void applyRamp();          // 斜面ツール: 始点から終点へ、一定の勾配でつなぐ
+	void drawRampPreview(const geo::Matrix4x4f &viewProj);
+	// 斜面の分類(0: 歩ける、1: 歩いては登れないがゆっくり登れる、2: 進めない)
+	int slopeClass(float slope) const;
 	std::string selectedProp() const;
 	void runAuto(const std::string &spec);
 
@@ -113,6 +118,12 @@ private:
 	std::vector<Action> undoStack_;
 	int savedCount_ = 0, importedCount_ = 0;
 	bool dirty_ = false;
+	bool showSlopes_ = false;    // 地面の勾配を色で表示する(Vキー): 緑=歩ける、黄=ゆっくり登れる、赤=進めない、紫=歩けないタイル
+	bool slopeDirty_ = true;     // 勾配のメッシュを作り直す必要がある(地形を変えた)
+	std::shared_ptr<VulkanMesh> slopeMesh_;
+	VulkanMaterial slopeMaterial_;
+	bool rampActive_ = false;    // 斜面ツールで、始点を決めてドラッグ中
+	float rampStart_[2] = {0.0f, 0.0f}, rampEnd_[2] = {0.0f, 0.0f}; // 始点・終点(ワールドのx, z)
 	bool showCollision_ = false; // 置物の足元の当たりの長方形を表示する(Cキー)
 	uint32_t lastTick_ = 0;
 	uint32_t startTick_ = 0;

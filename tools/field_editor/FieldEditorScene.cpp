@@ -9,6 +9,7 @@
 #include "sdl/SDLVulkanWindow.h"
 #include "ui/PadNames.h"
 #include "vk/PrimitiveMeshes.h"
+#include "vk/Vertex.h"
 #include "vk/VulkanMath.h"
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_log.h>
@@ -68,6 +69,11 @@ void FieldEditorScene::onCreate(uint32_t tick)
 		return;
 	}
 	white_ = window.createTexture(solidImage(255, 255, 255));
+	slopeMaterial_.texture = white_;
+	slopeMaterial_.specular = 0.0f;
+	slopeMaterial_.castShadow = false;
+	slopeMaterial_.receiveShadow = false;
+	slopeMaterial_.alpha = 0.5f;
 	propRenderer_ = std::make_unique<game::PropRenderer>(window, resources());
 	refreshProps();
 
@@ -155,12 +161,21 @@ void FieldEditorScene::beginStroke()
 	touchedHeights_.clear();
 	if(hasHit_){
 		flattenHeight_ = map_.heightAt(hit_[0], hit_[2]);
+		if(mode_ == ModeHeight && tool_ == ToolRamp){
+			rampActive_ = true;
+			rampStart_[0] = rampEnd_[0] = hit_[0];
+			rampStart_[1] = rampEnd_[1] = hit_[2];
+		}
 	}
 }
 
 void FieldEditorScene::endStroke()
 {
 	painting_ = false;
+	if(rampActive_){
+		applyRamp(); // 斜面ツール: ドラッグを離したときに、始点から終点へつなぐ
+		rampActive_ = false;
+	}
 	commit(std::move(stroke_));
 	stroke_ = Action();
 	touchedHeights_.clear();
@@ -194,6 +209,7 @@ void FieldEditorScene::paintTiles(float x, float z)
 			if(map_.set(tx, tz, static_cast<uint8_t>(brush_))){
 				stroke_.tiles.push_back({tz * map_.width() + tx, before});
 				renderer_->invalidate(tx, tz, tx, tz);
+				slopeDirty_ = true; // 歩けないタイルの表示が変わる
 			}
 		}
 	}
@@ -257,6 +273,7 @@ void FieldEditorScene::sculpt(float x, float z, float dt)
 				stroke_.heights.push_back({index, before});
 			}
 			renderer_->invalidate(change.vx - 1, change.vz - 1, change.vx, change.vz);
+			slopeDirty_ = true;
 		}
 	}
 }
@@ -328,6 +345,7 @@ void FieldEditorScene::undo()
 		map_.set(x, z, it->before);
 		renderer_->invalidate(x, z, x, z);
 	}
+	slopeDirty_ = true;
 	dirty_ = true;
 }
 
@@ -351,6 +369,7 @@ void FieldEditorScene::reload()
 		SDL_Log("field: loaded %s (%dx%d, %zu props)", filePath().c_str(), map_.width(), map_.depth(), map_.props().size());
 	}
 	rebuildField();
+	slopeDirty_ = true;
 	undoStack_.clear();
 	dirty_ = false;
 }
@@ -387,6 +406,10 @@ void FieldEditorScene::command(const std::string &name, double value)
 	}
 	else if(name == "lift"){
 		propLift_ = std::clamp(propLift_ + static_cast<float>(value), -20.0f, 50.0f);
+	}
+	else if(name == "slopes"){
+		showSlopes_ = !showSlopes_;
+		slopeDirty_ = true;
 	}
 	else if(name == "collision"){
 		showCollision_ = !showCollision_;
@@ -425,6 +448,7 @@ void FieldEditorScene::command(const std::string &name, double value)
 		}
 		if(!action.empty()){
 			commit(std::move(action));
+			slopeDirty_ = true;
 			renderer_->invalidate(0, 0, map_.width(), map_.depth());
 		}
 	}
@@ -497,12 +521,136 @@ void FieldEditorScene::dispatch(const SDL_Event &event)
 	}
 }
 
+int FieldEditorScene::slopeClass(float slope) const
+{
+	if(slope <= settings_.maxSlope){
+		return 0;
+	}
+	return slope <= settings_.maxClimbSlope ? 1 : 2;
+}
+
+// 勾配の表示: マスごとに、その2枚の三角形の勾配(高さの差/距離)の大きい方で、色を決める。歩けないタイルは紫
+void FieldEditorScene::rebuildSlopeMesh()
+{
+	slopeDirty_ = false;
+	std::vector<vk_::Vertex> vertices;
+	std::vector<uint32_t> indices;
+	const float cell = map_.cellSize();
+	static const float kColors[4][3] = {{0.2f, 0.9f, 0.3f}, {1.0f, 0.85f, 0.1f}, {1.0f, 0.2f, 0.2f}, {0.65f, 0.25f, 0.95f}};
+	for(int z = 0; z < map_.depth(); ++z){
+		for(int x = 0; x < map_.width(); ++x){
+			const float h00 = map_.vertexHeight(x, z), h10 = map_.vertexHeight(x + 1, z), h01 = map_.vertexHeight(x, z + 1), h11 = map_.vertexHeight(x + 1, z + 1);
+			const float g1 = std::hypot(h10 - h00, h11 - h10) / cell, g2 = std::hypot(h11 - h01, h01 - h00) / cell;
+			const size_t tile = map_.get(x, z);
+			const bool blocked = tile < tiles_.size() && !tiles_[tile].walkable;
+			const float *color = kColors[blocked ? 3 : slopeClass(std::max(g1, g2))];
+			const uint32_t base = static_cast<uint32_t>(vertices.size());
+			const int vx[4] = {x, x, x + 1, x + 1}, vz[4] = {z, z + 1, z + 1, z};
+			for(int k = 0; k < 4; ++k){
+				vk_::Vertex vertex{};
+				vertex.position[0] = vx[k] * cell;
+				vertex.position[1] = map_.vertexHeight(vx[k], vz[k]) + 0.04f;
+				vertex.position[2] = vz[k] * cell;
+				vertex.color[0] = color[0];
+				vertex.color[1] = color[1];
+				vertex.color[2] = color[2];
+				map_.vertexNormal(vx[k], vz[k], vertex.normal);
+				vertices.push_back(vertex);
+			}
+			for(uint32_t i : {0u, 1u, 2u, 2u, 3u, 0u}){
+				indices.push_back(base + i);
+			}
+		}
+	}
+	slopeMesh_ = std::make_shared<VulkanMesh>(vulkanWindow(*this).getContext(), vertices.data(), static_cast<uint32_t>(vertices.size()),
+		indices.data(), static_cast<uint32_t>(indices.size()));
+}
+
+// 斜面ツール: 始点の高さから終点の高さへ、一定の勾配でつなぐ。始点→終点の線から、ブラシの半径(幅)の中の頂点を、その線上の高さへ寄せる(幅の外へ1マスかけて、なじませる)
+void FieldEditorScene::applyRamp()
+{
+	const float cell = map_.cellSize();
+	const float ax = rampStart_[0], az = rampStart_[1], bx = rampEnd_[0], bz = rampEnd_[1];
+	const float dx = bx - ax, dz = bz - az;
+	const float lengthSquared = dx * dx + dz * dz;
+	if(lengthSquared < cell * cell){
+		return; // 短すぎる(ほとんど動かさなかった)
+	}
+	const float ha = map_.heightAt(ax, az), hb = map_.heightAt(bx, bz);
+	const float halfWidth = (static_cast<float>(radius_) + 0.5f) * cell;
+	const float reach = halfWidth + cell;
+	const int vx0 = std::max(0, static_cast<int>(std::floor((std::min(ax, bx) - reach) / cell))), vx1 = std::min(map_.width(), static_cast<int>(std::ceil((std::max(ax, bx) + reach) / cell)));
+	const int vz0 = std::max(0, static_cast<int>(std::floor((std::min(az, bz) - reach) / cell))), vz1 = std::min(map_.depth(), static_cast<int>(std::ceil((std::max(az, bz) + reach) / cell)));
+	struct Change { int vx, vz; float height; };
+	std::vector<Change> changes;
+	for(int vz = vz0; vz <= vz1; ++vz){
+		for(int vx = vx0; vx <= vx1; ++vx){
+			const float px = vx * cell - ax, pz = vz * cell - az;
+			const float t = std::clamp((px * dx + pz * dz) / lengthSquared, 0.0f, 1.0f);
+			const float ex = px - dx * t, ez = pz - dz * t;
+			const float distance = std::sqrt(ex * ex + ez * ez);
+			if(distance > reach){
+				continue;
+			}
+			const float weight = distance <= halfWidth ? 1.0f : 1.0f - (distance - halfWidth) / cell;
+			const float height = map_.vertexHeight(vx, vz);
+			const float target = ha + (hb - ha) * t;
+			changes.push_back({vx, vz, std::clamp(height + (target - height) * weight, -60.0f, 60.0f)});
+		}
+	}
+	for(const auto &change : changes){
+		const int index = map_.vertexIndex(change.vx, change.vz);
+		const int16_t before = map_.rawHeightAt(index);
+		if(map_.setVertexHeight(change.vx, change.vz, change.height)){
+			if(touchedHeights_.insert(index).second){
+				stroke_.heights.push_back({index, before});
+			}
+			renderer_->invalidate(change.vx - 1, change.vz - 1, change.vx, change.vz);
+		}
+	}
+	slopeDirty_ = true;
+}
+
+// 斜面ツールの、ドラッグ中の見本: 始点から終点への線を、できる勾配の色(緑・黄・赤)の点で
+void FieldEditorScene::drawRampPreview(const geo::Matrix4x4f &viewProj)
+{
+	auto &window = vulkanWindow(*this);
+	const float cell = map_.cellSize();
+	const float dx = rampEnd_[0] - rampStart_[0], dz = rampEnd_[1] - rampStart_[1];
+	const float length = std::sqrt(dx * dx + dz * dz);
+	if(length < 1e-3f){
+		return;
+	}
+	const float ha = map_.heightAt(rampStart_[0], rampStart_[1]), hb = map_.heightAt(rampEnd_[0], rampEnd_[1]);
+	const int klass = slopeClass(std::fabs(hb - ha) / length);
+	static const float kColors[3][3] = {{0.2f, 1.0f, 0.3f}, {1.0f, 0.9f, 0.1f}, {1.0f, 0.25f, 0.25f}};
+	const int steps = std::max(2, static_cast<int>(length / (cell * 0.5f)));
+	for(int i = 0; i <= steps; ++i){
+		const float t = static_cast<float>(i) / steps;
+		const float x = rampStart_[0] + dx * t, z = rampStart_[1] + dz * t;
+		geo::AffineMap mark;
+		mark.setPos(geo::Vector3f(x, map_.heightAt(x, z) + 0.15f, z));
+		mark.setRotation(geo::Quaternionf::createRotater(-1.5707963f, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+		mark.setScale(geo::Vector3f(cell * 0.4f, cell * 0.4f, 1.0f));
+		window.drawSprite3D(white_, viewProj * mark.getMatrix(), kColors[klass][0], kColors[klass][1], kColors[klass][2], 0.9f);
+	}
+}
+
 void FieldEditorScene::drawField(const geo::Matrix4x4f &viewProj)
 {
 	auto &window = vulkanWindow(*this);
 	renderer_->update(map_);
 	renderer_->draw(window, viewProj);
 	propRenderer_->draw(map_, viewProj);
+	if(showSlopes_){
+		if(slopeDirty_ || !slopeMesh_){
+			rebuildSlopeMesh();
+		}
+		window.draw(slopeMesh_, viewProj, geo::createIdentityMatrix4x4<float>(), slopeMaterial_);
+	}
+	if(rampActive_){
+		drawRampPreview(viewProj);
+	}
 	if(showCollision_){ // 置物の足元の当たり(ゲームで歩いて当たる範囲)の長方形
 		for(const auto &prop : map_.props()){
 			const auto &shape = propRenderer_->footprint(map_.propName(prop.prop));
@@ -603,6 +751,18 @@ void FieldEditorScene::runAuto(const std::string &spec)
 		}
 		hasHit_ = false;
 	}
+	else if(name == "ramp"){ // ramp,x0,z0,x1,z1: 斜面ツールで、(x0,z0)から(x1,z1)へドラッグしたことにする
+		mode_ = ModeHeight;
+		tool_ = ToolRamp;
+		hit_[0] = static_cast<float>(number(1));
+		hit_[2] = static_cast<float>(number(2));
+		hasHit_ = true;
+		beginStroke();
+		rampEnd_[0] = static_cast<float>(number(3));
+		rampEnd_[1] = static_cast<float>(number(4));
+		endStroke();
+		hasHit_ = false;
+	}
 	else if(name == "cam"){ // cam,yaw,pitch,距離,x,z
 		yaw_ = static_cast<float>(number(1));
 		pitch_ = static_cast<float>(number(2));
@@ -630,7 +790,7 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 	lastTick_ = tick;
 
 	// 動作確認用: VULKAN_AUTOCMD="命令,値,...@ミリ秒;..."(時刻の昇順)で、シーン開始からその時間後に、その編集をする(画面を撮って確認するため)。
-	//   命令: mode,N / tool,N / brush,N / radius,N / prop,N / yaw,度 / scale,倍 / save / stroke,x,z,フレーム数 / cam,yaw,pitch,距離,x,z / import,パス / undo
+	//   命令: mode,N / tool,N / brush,N / radius,N / prop,N / yaw,度 / scale,倍 / save / stroke,x,z,フレーム数 / ramp,x0,z0,x1,z1 / slopes / cam,yaw,pitch,距離,x,z / import,パス / undo
 	static const char *autoCmd = SDL_getenv("VULKAN_AUTOCMD");
 	if(autoCmd){
 		const std::string all(autoCmd);
@@ -700,7 +860,13 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 			paintTiles(hit_[0], hit_[2]);
 		}
 		else if(mode_ == ModeHeight){
-			sculpt(hit_[0], hit_[2], dt);
+			if(tool_ == ToolRamp){
+				rampEnd_[0] = hit_[0];
+				rampEnd_[1] = hit_[2];
+			}
+			else{
+				sculpt(hit_[0], hit_[2], dt);
+			}
 		}
 	}
 
@@ -715,6 +881,12 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 	world.values["propSel"] = static_cast<float>(propSel_ - propPage_ * kPropsPerPage); // ページの中の何番目か(ページの外ならはみ出す)
 	world.values["propPage"] = static_cast<float>(propPage_);
 	world.values["propPages"] = static_cast<float>(std::max(1, (static_cast<int>(propList_.size()) + kPropsPerPage - 1) / kPropsPerPage));
+	world.values["slopes"] = showSlopes_ ? 1.0f : 0.0f;
+	{
+		const float dx = rampEnd_[0] - rampStart_[0], dz = rampEnd_[1] - rampStart_[1];
+		const float length = std::sqrt(dx * dx + dz * dz);
+		world.values["rampSlope"] = rampActive_ && length > 1e-3f ? (map_.heightAt(rampEnd_[0], rampEnd_[1]) - map_.heightAt(rampStart_[0], rampStart_[1])) / length : 0.0f;
+	}
 	world.values["propYaw"] = propYaw_ * 57.2957795f;
 	world.values["propScale"] = propScale_;
 	world.values["propLift"] = propLift_;
