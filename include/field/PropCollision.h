@@ -16,6 +16,7 @@ struct PropFootprint
 {
 	bool valid = false;
 	float minX = 0.0f, maxX = 0.0f, minZ = 0.0f, maxZ = 0.0f;
+	float top = 0.0f; // モデル全体のいちばん高い所(足元から。跳び越えられるかの判定に使う)
 };
 PropFootprint computeFootprint(const model::ModelData &data, float sliceTop = 1.0f);
 
@@ -32,12 +33,15 @@ public:
 	bool resolve(float &x, float &z, float radius) const;
 	// 円が物に当たっているか(押し出さない)
 	bool overlaps(float x, float z, float radius) const;
+	// 円が当たっている物のうち、いちばん高いてっぺんの高さ(ワールド。当たっている物が無ければ、float の最小値)
+	float topAt(float x, float z, float radius) const;
 
 	struct Box
 	{
 		float x = 0.0f, z = 0.0f;       // 置いた位置
 		float cosYaw = 1.0f, sinYaw = 0.0f;
 		float minX = 0.0f, maxX = 0.0f, minZ = 0.0f, maxZ = 0.0f; // 向きを揃えた(回転前の)長方形。拡大済み
+		float top = 0.0f; // てっぺんの高さ(ワールド)
 	};
 	const std::vector<Box> &boxes() const { return boxes_; }
 

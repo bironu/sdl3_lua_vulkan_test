@@ -24,6 +24,8 @@ struct Quat
 	Quat conjugate() const { return {-x, -y, -z, w}; }
 	Quat normalized() const;
 	static Quat slerp(const Quat &a, const Quat &b, float t);
+	// ベクトルを回す(q v q^-1)
+	Vec3 rotate(const Vec3 &v) const;
 };
 
 // 剛体変換 v' = R v + t (Rは3x3回転行列)。ボーンの現在の姿勢(グローバル)やスキニング行列に使う

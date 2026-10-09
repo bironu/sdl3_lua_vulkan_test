@@ -4,6 +4,7 @@
 #include "geo/AffineMap.h"
 #include "model/Vrma.h"
 #include "scene/Scene.h"
+#include "scene/game/EnemyHorde.h"
 #include "scene/game/GameSettings.h"
 #include "field/FieldMap.h"
 #include "field/FieldMovement.h"
@@ -61,6 +62,7 @@ private:
 	void setupLighting(SDL_::VulkanWindow &window);
 	void loadField(SDL_::VulkanWindow &window);
 	bool loadPlayer(SDL_::VulkanWindow &window); // 作れなかったらfalse
+	void loadEnemies(SDL_::VulkanWindow &window); // 敵の定義(res/lua/data/enemies.lua)を読んで、プレイヤーのまわりに出す(F5で出し直す)
 	void loadMotions();
 	void measureLoopSeams();
 	void setupUi(SDL_::VulkanWindow &window);
@@ -93,7 +95,7 @@ private:
 	void updateLocomotion(float dt, const PlayerInput &input, const MoveDir &dir);
 	void updateTilt(float dt);
 	void applyMotion(float dt);
-	void drawScene(const geo::Matrix4x4f &viewProj);
+	void drawScene(const geo::Matrix4x4f &viewProj, const geo::Vector3f &eye);
 	void reloadAll();                    // F5: データ定義・HUD・調整値の読み直し
 	void updateHud(float dt, uint32_t tick);
 	void setPaused(bool paused);
@@ -179,6 +181,7 @@ private:
 	field::PropCollision propCollision_;         // 置物の足元の当たり
 	float playerY_ = 0.0f; // プレイヤーの足元の高さ(地面の高さ)
 	std::unique_ptr<BlobShadow> blob_;
+	std::unique_ptr<EnemyHorde> enemies_; // 敵の大軍(プレイヤーへ向かって歩くだけ。当たり判定は無し)
 	uint32_t lastTick_ = 0;
 
 	// HUD(Luaのウィジェット。3Dの上に重ねて描く)

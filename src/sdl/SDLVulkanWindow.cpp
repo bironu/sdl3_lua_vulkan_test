@@ -430,8 +430,9 @@ bool VulkanWindow::createDescriptors()
 		return false;
 	}
 
-	// ボーン行列(スキニング用)のdescriptor setプール(set 2)
-	bonePool_ = std::make_shared<VulkanBonePool>(ctx_, 256, 8192);
+	// ボーン行列(スキニング用)のdescriptor setプール(set 2)。モデル1つにつきフレーム枠の数だけ使う。敵の大軍(GameSceneのEnemyHorde。数千体)と、
+	// その読み直し(前の分が描画中のフレームで生きている間に、新しく作る)が収まる数
+	bonePool_ = std::make_shared<VulkanBonePool>(ctx_, 8192, 8192);
 	if(!bonePool_->isValid()){
 		return false;
 	}
