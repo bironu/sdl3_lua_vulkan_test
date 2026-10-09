@@ -1,5 +1,5 @@
-#if !defined(MODEL_CREATUREBUILDER_H_)
-#define MODEL_CREATUREBUILDER_H_
+#if !defined(CREATURE_CREATUREBUILDER_H_)
+#define CREATURE_CREATUREBUILDER_H_
 
 #include "model/ModelData.h"
 #include <memory>
@@ -9,7 +9,7 @@
 namespace model
 {
 
-// 手続き的に作る、丸い生き物の形: ふっくらした卵形の胴体の前面に顔(閉じ目の弧と口)、細い棒の手足。
+// 手続き的に作る、丸い生き物の形: ふっくらした卵形の胴体の前面に顔(閉じ目の弧と口)、細い棒の手足(ツール creature2glb だけが使う。ゲームは書き出した glb を読む)。
 // 長さの単位は任意(ふつうはメートル。描画の側で大きさを合わせる)、角度はラジアン。
 // 向きの言葉: 前(forward)はモデルの正面(元の座標系の-Z)、外(out)は体の中心から左右の外側、上(up)は+Y
 struct CreatureSpec
@@ -82,4 +82,4 @@ std::shared_ptr<ModelData> buildCreature(const CreatureSpec &spec, const std::st
 
 } // namespace model
 
-#endif // MODEL_CREATUREBUILDER_H_
+#endif // CREATURE_CREATUREBUILDER_H_

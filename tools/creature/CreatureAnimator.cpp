@@ -1,4 +1,4 @@
-#include "scene/game/CreatureAnimator.h"
+#include "creature/CreatureAnimator.h"
 #include <SDL3/SDL_log.h>
 #include <algorithm>
 #include <cmath>
@@ -67,7 +67,7 @@ const model::Vec3 kAxisZ{0.0f, 0.0f, 1.0f};
 
 CreatureAnimator::CreatureAnimator(const model::Skeleton &skeleton, const std::vector<model::ModelVertex> &vertices, const CreatureMotion &motion,
 	float metersToModel)
-	: CreatureDriver(motion.blend), motion_(motion), toModel_(metersToModel)
+	: CreatureDriver(1.0f), motion_(motion), toModel_(metersToModel)
 {
 	body_ = skeleton.findBone("body");
 	// 手足: <name>_left_hip / <name>_right_hip から、同じ頭の knee / ankle / foot を探す

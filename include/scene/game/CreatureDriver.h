@@ -7,8 +7,9 @@
 namespace game
 {
 
-// 丸い生き物の敵の動き(姿勢)を作るものの、共通の部分: 動きの種類と、個体ごとの状態(State)の進め方(動きの切り替えと混ぜ具合・歩きの位相・時計)。
-// 姿勢の作り方は2通り: CreatureAnimator(数式で作る)と、CreatureClipAnimator(glTF のアニメーションのクリップを再生する)。
+// 敵の動き(姿勢)を作るものの、共通の部分: 動きの種類と、個体ごとの状態(State)の進め方(動きの切り替えと混ぜ具合・歩きの位相・時計)。
+// 姿勢の作り方は2通り: ゲームは CreatureClipAnimator(glTF のアニメーションのクリップを再生する)、ツール creature2glb は CreatureAnimator
+// (tools/creature/。数式で作り、クリップに焼き込む)。
 // 種類ごとに1つ作り、個体ごとの State を動かす
 class CreatureDriver
 {

@@ -1,6 +1,7 @@
-// 丸い生き物の敵(model::buildCreature の形と、game::CreatureAnimator の動き)を、glTF 2.0 のバイナリ(.glb)に書き出すツール。ウィンドウは作らない。
-// 使い方: creature2glb [出力.glb] [種類の名前]
-//   出力の既定は res/model/enemy/creature.glb。種類の既定は res/lua/data/enemies.lua の、最初の creature の種類。パスはリポジトリ直下からの相対パス。
+// 丸い生き物の敵(model::buildCreature の形と、game::CreatureAnimator の動き。どちらも tools/creature/ にあり、このツールだけが使う)を、
+// glTF 2.0 のバイナリ(.glb)に書き出すツール。ウィンドウは作らない。ゲームは、書き出した glb のモデルとクリップだけを読む(生成器は持たない)。
+// 使い方: creature2glb <定義.lua> <出力.glb>   (例: creature2glb tools/creatures/hopper.lua res/model/enemy/hopper.glb)
+//   定義は Lua の creature の表(形・大きさ・動きの数値。tools/creatures/README.md)。パスはリポジトリ直下からの相対パス。
 //   書き出した後、エンジンの glTF の読み込み(model::loadVrm)で読み直して、頂点・ボーンが元と一致するかを確かめる(合わなければ終了コード1)
 // 中身(VRMの拡張は無い、ふつうの glTF):
 //   - メッシュ1つ(材質ごとのプリミティブ。POSITION・NORMAL・JOINTS_0・WEIGHTS_0。UV無し)、材質(色だけ)、スキン(ボーンのノードの階層)
@@ -9,9 +10,9 @@
 //   - クリップは「その場」の姿勢だけを持つ(root の translation は動かさない。ゲームは root の平行移動を当てない = ルートモーションはゲームが決める)。
 //     攻撃B(attackJump)は、溜め → 踏み切り → 空中(足を広げる) → 着地(びたーん)の姿勢だけで、跳ぶ高さ・距離・向き・滞空時間は、
 //     敵がその場(プレイヤーとの距離・経路の障害物)に応じて決める(EnemyHorde。空中の区間は、滞空時間に合わせて伸縮して再生する)
-//   - 書き出したときに、攻撃A・攻撃Bの区間の境(秒)をログに出す。enemies.lua の motions(attackStand の fallStart など、attackJump の crouchEnd など)は、
-//     この値に合わせる。Blender でタイミング(キーの時刻)を変えたら、enemies.lua の区間の秒も直すこと
-//   - 単位はメートル(enemies.lua の length などで合わせた、ゲームの中の大きさ)。座標は glTF の右手系(+Y上、正面+Z)
+//   - 書き出したときに、歩きの1周で進む距離(m)と、攻撃A・攻撃Bの区間の境(秒)をログに出す。enemies.lua の motions(walkFast の stride、
+//     attackStand の fallStart など、attackJump の crouchEnd など)は、この値に合わせる。Blender でタイミング(キーの時刻)を変えたら、enemies.lua の区間の秒も直すこと
+//   - 単位はメートル(定義の length に合わせた、ゲームの中の大きさ)。座標は glTF の右手系(+Y上、正面+Z)。休止ポーズで、いちばん低い足先が Y=0
 // Blender での使い方(メモ):
 //   - 読み込み: ファイル > インポート > glTF 2.0。既定の設定でよい(「ボーンの方向」は Blender か Temperance。ボーンの向きは見た目だけで、動きは変わらない)。
 //     Blender は Z が上なので、+Y上 → +Z上 に直して読まれる(正面は -Y。フロントビュー(テンキー1)で顔がこちらを向く)
@@ -20,19 +21,18 @@
 //   - root ボーンの拡大縮小にも、キーがある(潰れ)。全部のアクションが、同じボーン・同じ種類のチャンネルを持つ(切り替えても前の姿勢が残らない)。
 //     root を動かしても(位置)、ゲームでは当てない(ルートモーションはゲームが決める)
 //   - 書き出し直し: ファイル > エクスポート > glTF 2.0、形式は glTF バイナリ(.glb)、「+Y上」をオン、アニメーションの「モード」を「アクション」にして、
-//     全部のアクションを書き出す。ゲームは、enemies.lua の clips に書いた .glb / .gltf のアニメーションを、motions の表のクリップの名前で再生する
-//     (CreatureClipAnimator。clips が無ければ、CreatureAnimator の数式で動かす)
-#include "model/CreatureBuilder.h"
+//     全部のアクションを書き出す。ゲームは、enemies.lua の model(clips)に書いた .glb / .gltf のアニメーションを、motions の表のクリップの名前で再生する
+//     (CreatureClipAnimator)
+#include "creature/CreatureDefinition.h"
 #include "model/GlbWriter.h"
 #include "model/GltfLoader.h"
 #include "model/Skeleton.h"
 #include "resources/ResourcePaths.h"
-#include "scene/game/CreatureAnimator.h"
-#include "scene/game/EnemyHorde.h"
 #include <SDL3/SDL_log.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -146,28 +146,29 @@ std::string vec(const float *v, int n)
 
 int main(int argc, char *argv[])
 {
-	if(argc > 3){
-		SDL_Log("usage: creature2glb [out.glb] [enemy type name]");
+	if(argc != 3){
+		SDL_Log("usage: creature2glb <definition.lua> <out.glb>   (e.g. creature2glb tools/creatures/hopper.lua res/model/enemy/hopper.glb)");
 		return 2;
 	}
-	const std::string outPath = argc > 1 ? argv[1] : "res/model/enemy/creature.glb";
-	const std::string typeName = argc > 2 ? argv[2] : std::string();
-	const std::vector<game::EnemyType> types = game::loadEnemyTypes();
-	const auto found = std::find_if(types.begin(), types.end(), [&](const game::EnemyType &t){
-		return t.creature && (typeName.empty() || t.name == typeName);
-	});
-	if(found == types.end()){
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "creature2glb: no creature type '%s' in enemies.lua", typeName.c_str());
+	const std::string definitionPath = argv[1], outPath = argv[2];
+	const std::optional<creature::CreatureDefinition> definition = creature::loadCreatureDefinition(definitionPath);
+	if(!definition){
 		return 1;
 	}
-	const game::EnemyType &type = *found;
-	const auto data = model::buildCreature(*type.creature, type.name);
-	const float scale = game::measureEnemy(type, data->vertices).scale;
+	const std::string &name = definition->name;
+	const auto data = model::buildCreature(definition->spec, name);
+	// 大きさ: 形の前後の長さ(全部の頂点の Z の範囲)を、定義の length(m)に合わせる
+	const auto [front, back] = std::minmax_element(data->vertices.begin(), data->vertices.end(), [](const model::ModelVertex &a, const model::ModelVertex &b){
+		return a.position[2] < b.position[2];
+	});
+	const float modelLength = data->vertices.empty() ? 0.0f : back->position[2] - front->position[2];
+	const float scale = definition->length > 0.0f && modelLength > 0.0f ? definition->length / modelLength : 1.0f;
 	model::Skeleton skeleton(data->bones);
-	const game::CreatureAnimator animator(skeleton, data->vertices, type.creatureMotion, 1.0f / scale);
+	const game::CreatureAnimator animator(skeleton, data->vertices, definition->motion, 1.0f / scale);
+	SDL_Log("creature2glb: '%s' from %s: %zu legs", name.c_str(), definitionPath.c_str(), animator.legCount());
 	const size_t boneCount = data->bones.size();
 
-	const auto &motion = type.creatureMotion;
+	const auto &motion = definition->motion;
 	const std::vector<Clip> clips = {
 		{"rest", Motion::Idle, 0.0f, false, true},
 		{"idle", Motion::Idle, 2.0f * std::max(motion.idle.period, 0.1f), true, false}, // 前足の振りが呼吸の半分の速さなので、2周期で1周
@@ -291,7 +292,7 @@ int main(int argc, char *argv[])
 		const model::Vec3 p = toGltf({bone.position[0], bone.position[1], bone.position[2]}, scale);
 		inverseBind.insert(inverseBind.end(), {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -p.x, -p.y, -p.z, 1});
 	}
-	nodes += ",{\"name\":\"" + type.name + "\",\"mesh\":0,\"skin\":0}";
+	nodes += ",{\"name\":\"" + name + "\",\"mesh\":0,\"skin\":0}";
 	sceneNodes += "," + std::to_string(boneCount);
 	const int inverseBindAccessor = writer.addAccessor(inverseBind, 16, "MAT4", false);
 
@@ -346,9 +347,9 @@ int main(int argc, char *argv[])
 	}
 
 	const std::string json = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"SDL3_Lua5_Vulkan creature2glb\"},"
-		"\"scene\":0,\"scenes\":[{\"name\":\"" + type.name + "\",\"nodes\":[" + sceneNodes + "]}],\"nodes\":[" + nodes + "],"
-		"\"meshes\":[{\"name\":\"" + type.name + "\",\"primitives\":[" + primitives + "]}],\"materials\":[" + materials + "],"
-		"\"skins\":[{\"name\":\"" + type.name + "\",\"inverseBindMatrices\":" + std::to_string(inverseBindAccessor) + ",\"skeleton\":0,\"joints\":[" + jointList + "]}],"
+		"\"scene\":0,\"scenes\":[{\"name\":\"" + name + "\",\"nodes\":[" + sceneNodes + "]}],\"nodes\":[" + nodes + "],"
+		"\"meshes\":[{\"name\":\"" + name + "\",\"primitives\":[" + primitives + "]}],\"materials\":[" + materials + "],"
+		"\"skins\":[{\"name\":\"" + name + "\",\"inverseBindMatrices\":" + std::to_string(inverseBindAccessor) + ",\"skeleton\":0,\"joints\":[" + jointList + "]}],"
 		"\"animations\":[" + animations + "],"
 		"\"accessors\":[" + writer.accessors() + "],\"bufferViews\":[" + writer.views() + "],"
 		"\"buffers\":[{\"byteLength\":" + std::to_string(writer.bin().size()) + "}]}";
@@ -356,9 +357,12 @@ int main(int argc, char *argv[])
 	if(!writer.save(fullPath, json)){
 		return 1;
 	}
-	SDL_Log("creature2glb: wrote %s ('%s', scale %.4f, %zu vertices, %zu triangles, %zu bones, %d primitives)", fullPath.c_str(), type.name.c_str(),
+	SDL_Log("creature2glb: wrote %s ('%s', scale %.4f, %zu vertices, %zu triangles, %zu bones, %d primitives)", fullPath.c_str(), name.c_str(),
 		static_cast<double>(scale), loadOrder.size(), data->indices.size() / 3, boneCount, primitiveCount);
-	// 区間の境(秒): enemies.lua の motions に合わせて書く値
+	// 歩きの1周で進む距離(m)と、区間の境(秒): enemies.lua の motions に合わせて書く値
+	SDL_Log("creature2glb: strides for enemies.lua motions: walkFast = { stride = %.3f }, walkSlow = { stride = %.3f } (speed %.2f / %.2f m/s)",
+		static_cast<double>(std::max(motion.walkFast.stride, 0.05f)), static_cast<double>(std::max(motion.walkSlow.stride, 0.05f)),
+		static_cast<double>(motion.walkFast.speed), static_cast<double>(motion.walkSlow.speed));
 	const auto &a = motion.stand;
 	const game::CreatureDriver::JumpPhases jump = animator.jumpPhases();
 	const float fallStart = a.rise + a.wiggle, fallEnd = fallStart + a.fall, recoverStart = fallEnd + a.hold, recoverEnd = recoverStart + a.recover;
@@ -373,8 +377,8 @@ int main(int argc, char *argv[])
 	if(!loaded){
 		return 1;
 	}
-	bool ok = loaded->vertices.size() == data->vertices.size() && loaded->vertices.size() == loadOrder.size()
-		&& loaded->indices.size() == data->indices.size() && loaded->bones.size() == boneCount + 1;
+	// (材質の境目の頂点は、両方のプリミティブに書くので、頂点の数は、書いた数 loadOrder と比べる)
+	bool ok = loaded->vertices.size() == loadOrder.size() && loaded->indices.size() == data->indices.size() && loaded->bones.size() == boneCount + 1;
 	float vertexError = 0.0f, boneError = 0.0f;
 	for(size_t i = 0; ok && i < loadOrder.size(); ++i){
 		const model::ModelVertex &a = loaded->vertices[i], &b = data->vertices[loadOrder[i]];

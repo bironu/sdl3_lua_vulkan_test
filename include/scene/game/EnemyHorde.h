@@ -3,13 +3,10 @@
 
 #include "geo/AffineMap.h"
 #include "geo/Matrix.h"
-#include "model/CreatureBuilder.h"
-#include "scene/game/CreatureAnimator.h"
 #include "scene/game/CreatureClipAnimator.h"
 #include "vk/VulkanModel.h"
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -32,18 +29,20 @@ namespace game
 class BlobShadow;
 
 // 敵の種類の定義。res/lua/data/enemies.lua の表から読む(読めない項目は、ここの既定のまま)。長さはメートル、時間は秒、角度はラジアン。
-// 体は2通り: creature(手続き的に作る丸い生き物の体。動きは、clips があればクリップの再生(CreatureClipAnimator)、無ければ数式(CreatureAnimator))か、
-// model(PMXのファイル。動きはMMDの名前のボーンを回す歩き)
+// 体(model)は、ファイルから読む。動きは2通り:
+// - クリップ(glTF のアニメーション。clips。既定は model と同じファイル): motions の表で、ゲームの動き(待機・歩き・攻撃)→ クリップの名前・区間を対応づけて、
+//   再生する(CreatureClipAnimator)。ボーンの数・名前は任意(特定の生き物の構造を前提にしない)
+// - クリップが無い PMX: MMDの名前のボーンを回す歩き
+// 形から決まる値(体長・当たりの箱・影の半径・地面に置く高さ)は、読んだメッシュから求める(表に書けば、その値で上書きする)
 struct EnemyType
 {
 	std::string name;
-	std::optional<model::CreatureSpec> creature; // 丸い生き物の体の形(あれば、model より優先)
-	std::string model;            // モデルのパス(PMX。ボーンはMMDの標準の名前)
+	std::string model;            // モデルのパス(glb / gltf / vrm / pmx。リポジトリ直下からの相対パス)
 	int count = 0;
 	uint32_t seed = 1;            // 出す位置・個体差の乱数の種
-	float height = 1.2f;          // 背の高さ(モデルの頂点の最大の高さを、これに合わせて拡大縮小する)
-	float length = 0.0f;          // 体長(モデルの前後の長さを、これに合わせる。0なら height で合わせる)
-	float speed = 1.4f;           // 歩く速さ(PMXの体。丸い生き物の体は、動きの表 walkFast / walkSlow の speed)
+	float height = 0.0f;          // 背の高さ(m。メッシュの高さを、これに合わせて拡大縮小する。PMXは1単位=約8cmなので、書くこと)
+	float length = 0.0f;          // 体長(m。メッシュの前後の長さを、これに合わせる。length も height も0なら、モデルの単位をメートルのまま使う)
+	float speed = 1.4f;           // 歩く速さ(PMXの体。クリップで動かす体は、behavior の fastSpeed / slowSpeed)
 	float speedJitter = 0.25f;    // 速さの個体差(±割合)
 	float turnSpeed = 5.0f;
 	float spawnMinRadius = 6.0f;  // プレイヤーからこの距離〜spawnRadiusの輪の中に出す
@@ -51,7 +50,7 @@ struct EnemyType
 	float stopDistance = 2.0f;    // プレイヤーにこの距離まで近づいたら止まる
 	float stopJitter = 3.0f;      // 止まる距離の個体差(0〜この値を足す)
 	// 敵同士の当たりの箱(軸に平行な箱。向きに合わせて回した箱を囲む。XZの平面で重なりを押し出し、高さの範囲も持つ)。
-	// 幅・長さ・高さが0なら、モデルの寸法(全部の頂点を囲む大きさ)から
+	// 幅・長さ・高さが0なら、モデルの寸法(休止ポーズの全部の頂点を囲む箱)から。箱の中心は、メッシュの前後・左右の範囲の中心
 	struct Box
 	{
 		float width = 0.0f;      // 左右の幅(m)
@@ -60,14 +59,16 @@ struct EnemyType
 		float fallLength = 0.0f; // 攻撃Aで前へ倒れ込んだときに、前へ伸ばす長さ(m)
 	} box;
 	float cameraCullRadius = 1.5f; // カメラ(目の位置)から箱までが、この距離より近い敵は描かない(画面を覆わないよう。影も)
-	float shadowRadius = 0.35f;
+	float shadowRadius = 0.0f;    // 足もとの丸い影の半径(m。0なら、当たりの箱の幅と長さの平均の半分)
 	float shadowOpacity = 0.5f;
-	CreatureMotion creatureMotion; // 丸い生き物の体の動き(表の walkFast / walkSlow / idle / attackStand / attackJump / death)
-	CreatureClipMotion clipMotion; // 丸い生き物の体を、クリップで動かすときの表(表の clips と motions。clips が無ければ使わない)
-	// 丸い生き物の体の行動: 歩いて近づき、プレイヤーとの距離に応じて、攻撃を選ぶ(当たり判定は無く、見た目の動きだけ)
+	CreatureClipMotion clipMotion; // クリップで動かすときの表(表の clips・motions・rootMotionBones)
+	float motionBlend = 5.0f;      // 動き(歩き・攻撃・待機)を切り替えるときに、混ぜて移る速さ(1/秒)
+	// クリップで動かす体の行動: 歩いて近づき、プレイヤーとの距離に応じて、攻撃を選ぶ(当たり判定は無く、見た目の動きだけ)
 	struct Behavior
 	{
 		float fastRatio = 0.5f;   // 早歩きで歩く個体の割合(残りは、ゆっくり歩き)
+		float fastSpeed = 1.4f;   // 早歩きの速さ(m/秒)
+		float slowSpeed = 0.8f;   // ゆっくり歩きの速さ(m/秒)
 		float closeRange = 1.8f;  // プレイヤーまでの距離がこれ以下なら、攻撃A(立ち上がって倒れ込む)を始められる
 		float jumpMin = 2.0f;     // 距離がこれより遠く、jumpRange 以下なら、攻撃B(跳びかかる)を始められる
 		float jumpRange = 4.0f;
@@ -78,6 +79,22 @@ struct EnemyType
 		float retry = 0.6f;       // 攻撃を試して始めなかったとき、次に試すまでの時間
 		float timeJitter = 0.15f; // 待機・攻撃の速さの個体差(±割合)
 	} behavior;
+	// 攻撃B(跳びかかる)の軌道: 踏み切りの直前に、敵が決める(着地点 → 跳ぶ距離 → 頂点の高さ → 滞空時間)。姿勢はクリップ(空中の区間を、滞空時間に合わせて伸縮する)
+	struct Jump
+	{
+		float height = 0.9f;      // 跳ぶ距離が distance のときの、頂点の高さ(m。距離に比例させ、minHeight〜maxHeight に収める)
+		float distance = 3.0f;    // 跳ぶ距離の上限(m)
+		float minDistance = 0.8f; // 跳ぶ距離の下限(m。経路が塞がれて、これより短くしか跳べないなら、跳ばずに歩く)
+		float minHeight = 0.4f;   // 頂点の高さの下限(m)
+		float maxHeight = 2.5f;   // 頂点の高さの上限(m。経路の障害物を越えるのに、これより高く跳ぶ必要があれば、越えられない)
+		float gravity = 20.0f;    // 重力(m/秒²)。滞空時間 = √(8 × 頂点の高さ ÷ gravity)
+		float clearance = 0.2f;   // 経路の障害物(地面・置物)の上に空ける高さ(m)
+		float probeStep = 0.25f;  // 経路の障害物を調べる間隔(m)
+		float landGap = 1.2f;     // 着地点の、プレイヤーまでの距離(m)
+		float landGapJitter = 0.0f;   // 着地点の、プレイヤーまでの距離の個体差(±m)
+		float landAngleJitter = 0.0f; // 着地点の、プレイヤーから見た向きのばらつき(±ラジアン。敵がいる向きから回す)
+		int landTries = 1;            // 着地点の候補の数(他の敵の箱と重ならない候補を選ぶ。全部重なるなら、重なりのいちばん小さい候補)
+	} jump;
 	// PMXの歩き(手続き的なアニメーション。表の gait)
 	struct Gait
 	{
@@ -113,19 +130,9 @@ struct EnemyType
 // 敵の定義の表を読む(パスはリポジトリ直下からの相対。読めなければ空。失敗はログに出す)
 std::vector<EnemyType> loadEnemyTypes(const std::string &relativePath = "res/lua/data/enemies.lua");
 
-// 敵のモデルの大きさ: 頂点の寸法(モデルの単位)と、モデルの単位→メートルの倍率(体長 length か、背の高さ height に合わせる)
-struct EnemySize
-{
-	float top = 0.0f;    // 頂点のいちばん高い所
-	float length = 0.0f; // 前後の長さ(前(-Z)・後ろ(+Z)の端の間。原点を含む)
-	float side = 0.0f;   // 左右の、中心からいちばん遠い所
-	float scale = 1.0f;
-};
-EnemySize measureEnemy(const EnemyType &type, const std::vector<model::ModelVertex> &vertices);
-
 // 敵の大軍。個体ごとに位置・向き・歩きの位相・速さの個体差を持ち、毎フレーム、プレイヤーへ向かって歩く(近くで止まる)。
 // 敵同士は、個体ごとの箱(EnemyType::Box)が重ならないよう押し出す(跳んでいる間は、他の敵の上を越える)。プレイヤー・ビルとの当たり・戦闘は無し。
-// 丸い生き物の体は、早歩きか、ゆっくり歩きで近づき、距離に応じて、立ち上がって倒れ込む攻撃か、跳びかかる攻撃をする(姿勢は CreatureClipAnimator か CreatureAnimator)。
+// クリップで動かす体は、早歩きか、ゆっくり歩きで近づき、距離に応じて、立ち上がって倒れ込む攻撃か、跳びかかる攻撃をする(姿勢は CreatureClipAnimator)。
 // 跳ぶ攻撃の軌道(着地点・頂点の高さ・滞空時間)は、踏み切りの直前に、経路の地面と置物の高さ・着地点に立てるかを見て決め、位置を放物線で動かす
 // (姿勢の空中の区間は、滞空時間に合わせて伸縮する)。PMXは、MMDの名前のボーンを周期的に回す歩き(IKは使わず、FKだけ)。
 // 描画は、個体ごとにVulkanModel(GPUスキニング)を1つずつ持つ(メッシュのGPUバッファは個体の数だけ複製される)。遠い個体は、姿勢の更新を間引く
@@ -150,10 +157,13 @@ private:
 	{
 		EnemyType def;
 		float scale = 1.0f;     // モデルの単位→メートル
+		float groundY = 0.0f;   // 地面に置く高さ: 休止ポーズのメッシュのいちばん低い点(モデルの単位)。これを Y=0 に合わせて描く
 		float boxWidth = 1.0f, boxLength = 1.0f, boxHeight = 1.0f; // 当たりの箱(m。表の box か、モデルの寸法から)
+		float boxSide = 0.0f, boxForward = 0.0f; // 当たりの箱の中心の、個体の位置からのずれ(m。左(+X)・前(-Z)。メッシュの範囲の中心)
+		float shadowRadius = 0.5f; // 足もとの丸い影の半径(m。表の shadowRadius か、箱の大きさから)
 		float boundY = 0.5f, boundRadius = 1.0f; // 画面に見えるかの判定の球(足元からの中心の高さと半径。m。手足の動きの分の余裕を含む)
 		float bodyRadius = 0.25f; // 跳ぶ経路の障害物を調べる円の半径(m。箱の幅・長さの短い方の半分)
-		std::unique_ptr<CreatureDriver> creature; // 丸い生き物の体の動き(クリップか数式。PMXは無し)
+		std::unique_ptr<CreatureDriver> creature; // クリップで動かす体の動き(PMXの歩きは無し)
 		// 以下はPMXの歩き用
 		float legLength = 0.0f; // 脚の付け根から足首までの長さ(モデルの単位)。脚を振ったときに腰を下げる分を求める
 		int center = -1, upper = -1, lower = -1;
@@ -174,7 +184,7 @@ private:
 		bool moving = false;
 		bool posedStill = false;  // 止まった姿勢(振れ幅0)を当て済み
 		bool poseDue = false;     // 姿勢を当て直す時期(drawで、見えていれば当てる)
-		CreatureDriver::State creature; // 丸い生き物の体の動きの状態
+		CreatureDriver::State creature; // クリップで動かす体の動きの状態
 		bool fast = false;        // 早歩きで歩く(でなければ、ゆっくり歩き)
 		float cooldown = 0.0f;    // 次に攻撃を試すまでの時間
 		float jumpFromX = 0.0f, jumpFromZ = 0.0f, jumpToX = 0.0f, jumpToZ = 0.0f; // 跳ぶ攻撃の、跳び立つ点と着地点

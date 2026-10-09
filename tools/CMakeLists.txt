@@ -13,6 +13,9 @@ add_executable(field_editor field_editor/main.cpp field_editor/FieldEditorScene.
 target_link_libraries(field_editor PRIVATE engine)
 add_dependencies(field_editor shaders)
 
-# 丸い生き物の敵(形とモーション)を、glTF 2.0 のバイナリ(.glb)に書き出す(敵の定義の読み込み・CreatureAnimator を使うので、engineライブラリをリンクする)
-add_executable(creature2glb creature2glb.cpp)
+# 丸い生き物の敵(形とモーション)を、glTF 2.0 のバイナリ(.glb)に書き出す。形の生成器(CreatureBuilder)と、数式の動き(CreatureAnimator)は
+# tools/creature/ にあり、このツールだけにコンパイルされる(ゲーム本体は、書き出した glb を読むだけ)。
+# 定義のLuaの読み込み・動きの共通の土台(CreatureDriver)を使うので、engineライブラリをリンクする
+add_executable(creature2glb creature2glb.cpp creature/CreatureBuilder.cpp creature/CreatureAnimator.cpp creature/CreatureDefinition.cpp)
+target_include_directories(creature2glb PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(creature2glb PRIVATE engine)

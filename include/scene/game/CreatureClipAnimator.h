@@ -14,7 +14,7 @@ namespace game
 // クリップで動かすときの、動きの名前 → クリップの表(res/lua/data/enemies.lua の clips と motions)。時間は秒(クリップの時刻)
 struct CreatureClipMotion
 {
-	std::string path; // クリップを読む glTF(.glb / .gltf。リポジトリ直下からの相対パス)。空なら、クリップでは動かさない(数式の CreatureAnimator)
+	std::string path; // クリップを読む glTF(.glb / .gltf。リポジトリ直下からの相対パス。既定は、モデルと同じファイル)。空なら、クリップでは動かさない(PMXの歩き)
 	struct Entry
 	{
 		std::string clip;    // クリップの名前(glTF のアニメーションの名前)
@@ -32,7 +32,7 @@ struct CreatureClipMotion
 	std::vector<std::string> rootMotionBones; // 平行移動を当てない(ルートモーションの)ボーン。空なら、親の無いボーン(root)
 };
 
-// 丸い生き物の動きを、glTF のアニメーションのクリップの再生で作る(CreatureAnimator の数式の代わり)。
+// 敵の動きを、glTF のアニメーションのクリップの再生で作る。ボーンの数・名前は任意(ClipPlayer がクリップのトラックとボーンを名前で対応づける。特定の生き物の構造を前提にしない)。
 // 動き(待機・歩き・攻撃)ごとに、表のクリップを再生し、切り替えの間は、前のクリップとクロスフェードする。
 // 時刻: 待機は個体の時計、歩きは歩きの位相 × クリップの長さ、攻撃・倒れは始めてからの時刻(攻撃B の空中の区間は、EnemyHorde が伸縮して進める)。
 // クリップの根のボーンの拡大縮小(潰れ・伸び)は bodyScale で返す。根のボーンの移動(ルートモーション)は当てない(前進・高さは EnemyHorde が決める)

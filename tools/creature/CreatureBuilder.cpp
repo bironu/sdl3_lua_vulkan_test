@@ -1,4 +1,4 @@
-#include "model/CreatureBuilder.h"
+#include "creature/CreatureBuilder.h"
 #include <algorithm>
 #include <array>
 #include <cmath>

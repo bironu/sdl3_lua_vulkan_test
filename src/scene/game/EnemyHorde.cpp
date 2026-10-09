@@ -68,220 +68,21 @@ model::Quat rotationX(float radians) { return model::Quat::fromAxisAngle({1.0f, 
 model::Quat rotationY(float radians) { return model::Quat::fromAxisAngle({0.0f, 1.0f, 0.0f}, radians); }
 model::Quat rotationZ(float radians) { return model::Quat::fromAxisAngle({0.0f, 0.0f, 1.0f}, radians); }
 
-void readFloat(const sol::table &table, const char *key, float &value)
-{
-	value = table.get_or(key, value);
-}
-
-void readFloat(const sol::optional<sol::table> &table, const char *key, float &value)
-{
-	if(table){
-		readFloat(*table, key, value);
-	}
-}
-
-void readInt(const sol::optional<sol::table> &table, const char *key, int &value)
-{
-	if(table){
-		value = table->get_or(key, value);
-	}
-}
-
-void readString(const sol::optional<sol::table> &table, const char *key, std::string &value)
-{
-	if(table){
-		value = table->get_or(key, value);
-	}
-}
-
-// table[key] の配列({a, b, c} など)から、先頭の N 個を読む(無い要素は、そのまま)
-template<size_t N>
-void readArray(const sol::optional<sol::table> &table, const char *key, float (&values)[N])
-{
-	if(!table){
-		return;
-	}
-	const sol::optional<sol::table> list = (*table)[key];
-	if(!list){
-		return;
-	}
-	for(size_t i = 0; i < N; ++i){
-		values[i] = list->get_or(static_cast<int>(i + 1), values[i]);
-	}
-}
-
-// 丸い生き物の体の形(enemies.lua の creature の表)
-model::CreatureSpec readCreatureSpec(const sol::table &t)
-{
-	model::CreatureSpec spec;
-	const sol::optional<sol::table> body = t["body"], face = t["face"], legMesh = t["legMesh"], color = t["color"];
-	readFloat(body, "length", spec.body.length);
-	readFloat(body, "width", spec.body.width);
-	readFloat(body, "height", spec.body.height);
-	readFloat(body, "taper", spec.body.taper);
-	readInt(body, "slices", spec.body.slices);
-	readInt(body, "sides", spec.body.sides);
-	readFloat(face, "pitch", spec.face.pitch);
-	readFloat(face, "lift", spec.face.lift);
-	readFloat(face, "eyeSpacing", spec.face.eyeSpacing);
-	readFloat(face, "eyeUp", spec.face.eyeUp);
-	readFloat(face, "eyeRadius", spec.face.eyeRadius);
-	readFloat(face, "eyeSpan", spec.face.eyeSpan);
-	readFloat(face, "eyeThickness", spec.face.eyeThickness);
-	readInt(face, "eyeSegments", spec.face.eyeSegments);
-	readFloat(face, "mouthUp", spec.face.mouthUp);
-	readFloat(face, "mouthWidth", spec.face.mouthWidth);
-	readFloat(face, "mouthHeight", spec.face.mouthHeight);
-	readInt(face, "mouthSides", spec.face.mouthSides);
-	readInt(legMesh, "sides", spec.legMesh.sides);
-	readInt(legMesh, "rings", spec.legMesh.rings);
-	readFloat(legMesh, "blend", spec.legMesh.blend);
-	readFloat(legMesh, "inset", spec.legMesh.inset);
-	readArray(color, "back", spec.color.back);
-	readArray(color, "belly", spec.color.belly);
-	readArray(color, "legs", spec.color.legs);
-	readArray(color, "face", spec.color.face);
-	readFloat(t, "bellyLine", spec.bellyLine);
-	if(const sol::optional<sol::table> legs = t["legs"]){
-		for(size_t i = 1; i <= legs->size(); ++i){
-			const sol::optional<sol::table> entry = (*legs)[i];
-			if(!entry){
-				continue;
-			}
-			model::CreatureSpec::Leg leg;
-			readString(entry, "name", leg.name);
-			readFloat(entry, "along", leg.along);
-			readFloat(entry, "angle", leg.angle);
-			readArray(entry, "knee", leg.knee);
-			readArray(entry, "ankle", leg.ankle);
-			readArray(entry, "foot", leg.foot);
-			readArray(entry, "radius", leg.radius);
-			spec.legs.push_back(std::move(leg));
-		}
-	}
-	return spec;
-}
-
-// 潰れ(attackStand / attackJump の squash の表)
-void readSquash(const sol::optional<sol::table> &motion, CreatureMotion::Squash &squash)
-{
-	if(!motion){
-		return;
-	}
-	const sol::optional<sol::table> t = (*motion)["squash"];
-	readFloat(t, "amount", squash.amount);
-	readFloat(t, "stretch", squash.stretch);
-	readFloat(t, "duration", squash.duration);
-	readFloat(t, "bounce", squash.bounce);
-}
-
-void readWalk(const sol::optional<sol::table> &walk, CreatureMotion::Walk &w)
-{
-	readFloat(walk, "speed", w.speed);
-	readFloat(walk, "stride", w.stride);
-	readFloat(walk, "duty", w.duty);
-	readFloat(walk, "swing", w.swing);
-	readFloat(walk, "lift", w.lift);
-	readFloat(walk, "kneeLift", w.kneeLift);
-	readFloat(walk, "bob", w.bob);
-	readFloat(walk, "hop", w.hop);
-	readFloat(walk, "nod", w.nod);
-	readFloat(walk, "sway", w.sway);
-	readFloat(walk, "roll", w.roll);
-}
-
-// 丸い生き物の体の動きと行動(enemies.lua の walkFast / walkSlow / idle / attackStand / attackJump / death / behavior の表)
-void readCreatureMotion(const sol::table &t, EnemyType &type)
-{
-	CreatureMotion &motion = type.creatureMotion;
-	const sol::optional<sol::table> idle = t["idle"], stand = t["attackStand"], jump = t["attackJump"], death = t["death"], behavior = t["behavior"];
-	readWalk(t["walkFast"], motion.walkFast);
-	readWalk(t["walkSlow"], motion.walkSlow);
-	readFloat(t, "motionBlend", motion.blend);
-	readFloat(idle, "period", motion.idle.period);
-	readFloat(idle, "breath", motion.idle.breath);
-	readFloat(idle, "pitch", motion.idle.pitch);
-	readFloat(idle, "frontSwing", motion.idle.frontSwing);
-	auto &a = motion.stand;
-	readFloat(stand, "rise", a.rise);
-	readFloat(stand, "angle", a.angle);
-	readFloat(stand, "frontRaise", a.frontRaise);
-	readFloat(stand, "frontFold", a.frontFold);
-	readFloat(stand, "wiggle", a.wiggle);
-	readFloat(stand, "wiggleCount", a.wiggleCount);
-	readFloat(stand, "wiggleSwing", a.wiggleSwing);
-	readFloat(stand, "wiggleKnee", a.wiggleKnee);
-	readFloat(stand, "fall", a.fall);
-	readFloat(stand, "fallEase", a.fallEase);
-	readFloat(stand, "fallAngle", a.fallAngle);
-	readFloat(stand, "reach", a.reach);
-	readFloat(stand, "reachOpen", a.reachOpen);
-	readFloat(stand, "reachKnee", a.reachKnee);
-	readFloat(stand, "bounce", a.bounce);
-	readFloat(stand, "hold", a.hold);
-	readFloat(stand, "recover", a.recover);
-	readSquash(stand, a.squash);
-	auto &j = motion.jump;
-	readFloat(jump, "crouch", j.crouch);
-	readFloat(jump, "crouchDepth", j.crouchDepth);
-	readFloat(jump, "crouchKnee", j.crouchKnee);
-	readFloat(jump, "crouchPitch", j.crouchPitch);
-	readFloat(jump, "launch", j.launch);
-	readFloat(jump, "air", j.air);
-	readFloat(jump, "height", j.height);
-	readFloat(jump, "distance", j.distance);
-	readFloat(jump, "landGap", j.landGap);
-	readFloat(jump, "airPitch", j.airPitch);
-	readFloat(jump, "spread", j.spread);
-	readFloat(jump, "spreadSwing", j.spreadSwing);
-	readFloat(jump, "bounce", j.bounce);
-	readFloat(jump, "hold", j.hold);
-	readFloat(jump, "recover", j.recover);
-	readFloat(jump, "airStretch", j.airStretch);
-	readFloat(jump, "landGapJitter", j.landGapJitter);
-	readFloat(jump, "landAngleJitter", j.landAngleJitter);
-	readInt(jump, "landTries", j.landTries);
-	readFloat(jump, "minDistance", j.minDistance);
-	readFloat(jump, "minHeight", j.minHeight);
-	readFloat(jump, "maxHeight", j.maxHeight);
-	readFloat(jump, "gravity", j.gravity);
-	readFloat(jump, "clearance", j.clearance);
-	readFloat(jump, "probeStep", j.probeStep);
-	readSquash(jump, j.squash);
-	readFloat(death, "duration", motion.death.duration);
-	readFloat(death, "roll", motion.death.roll);
-	readFloat(death, "curl", motion.death.curl);
-	auto &b = type.behavior;
-	readFloat(behavior, "fastRatio", b.fastRatio);
-	readFloat(behavior, "closeRange", b.closeRange);
-	readFloat(behavior, "jumpMin", b.jumpMin);
-	readFloat(behavior, "jumpRange", b.jumpRange);
-	readFloat(behavior, "standChance", b.standChance);
-	readFloat(behavior, "jumpChance", b.jumpChance);
-	readFloat(behavior, "cooldown", b.cooldown);
-	readFloat(behavior, "cooldownJitter", b.cooldownJitter);
-	readFloat(behavior, "retry", b.retry);
-	readFloat(behavior, "timeJitter", b.timeJitter);
-}
-
 void readClipEntry(const sol::optional<sol::table> &motions, const char *key, CreatureClipMotion::Entry &entry)
 {
 	if(!motions){
 		return;
 	}
 	const sol::optional<sol::table> t = (*motions)[key];
-	readString(t, "clip", entry.clip);
-	readFloat(t, "stride", entry.stride);
-	if(t){
-		entry.loop = t->get_or("loop", entry.loop);
-	}
+	readField(t, "clip", entry.clip);
+	readField(t, "loop", entry.loop);
+	readField(t, "stride", entry.stride);
 }
 
-// クリップで動かすときの表(enemies.lua の clips・motions・rootMotionBones)
-void readClipMotion(const sol::table &t, CreatureClipMotion &clips)
+// クリップで動かすときの表(enemies.lua の motions・rootMotionBones)。path はクリップを読むファイル
+void readClipMotion(const sol::table &t, const sol::optional<sol::table> &motions, const std::string &path, CreatureClipMotion &clips)
 {
-	clips.path = t.get_or("clips", clips.path);
-	const sol::optional<sol::table> motions = t["motions"];
+	clips.path = path;
 	readClipEntry(motions, "idle", clips.idle);
 	readClipEntry(motions, "walkFast", clips.walkFast);
 	readClipEntry(motions, "walkSlow", clips.walkSlow);
@@ -293,18 +94,99 @@ void readClipMotion(const sol::table &t, CreatureClipMotion &clips)
 		stand = (*motions)["attackStand"].get<sol::optional<sol::table>>();
 		jump = (*motions)["attackJump"].get<sol::optional<sol::table>>();
 	}
-	readFloat(stand, "fallStart", clips.stand.fallStart);
-	readFloat(stand, "fallEnd", clips.stand.fallEnd);
-	readFloat(stand, "recoverStart", clips.stand.recoverStart);
-	readFloat(stand, "recoverEnd", clips.stand.recoverEnd);
-	readFloat(jump, "crouchEnd", clips.jump.crouchEnd);
-	readFloat(jump, "launchEnd", clips.jump.launchEnd);
-	readFloat(jump, "airEnd", clips.jump.airEnd);
+	readField(stand, "fallStart", clips.stand.fallStart);
+	readField(stand, "fallEnd", clips.stand.fallEnd);
+	readField(stand, "recoverStart", clips.stand.recoverStart);
+	readField(stand, "recoverEnd", clips.stand.recoverEnd);
+	readField(jump, "crouchEnd", clips.jump.crouchEnd);
+	readField(jump, "launchEnd", clips.jump.launchEnd);
+	readField(jump, "airEnd", clips.jump.airEnd);
 	if(const sol::optional<sol::table> bones = t["rootMotionBones"]){
 		for(size_t i = 1; i <= bones->size(); ++i){
 			clips.rootMotionBones.push_back(bones->get_or(static_cast<int>(i), std::string()));
 		}
 	}
+}
+
+// クリップで動かす体の行動と、跳ぶ攻撃の軌道(enemies.lua の behavior・jump の表)
+void readBehavior(const sol::optional<sol::table> &behavior, const sol::optional<sol::table> &jump, EnemyType &type)
+{
+	auto &b = type.behavior;
+	readField(behavior, "fastRatio", b.fastRatio);
+	readField(behavior, "fastSpeed", b.fastSpeed);
+	readField(behavior, "slowSpeed", b.slowSpeed);
+	readField(behavior, "closeRange", b.closeRange);
+	readField(behavior, "jumpMin", b.jumpMin);
+	readField(behavior, "jumpRange", b.jumpRange);
+	readField(behavior, "standChance", b.standChance);
+	readField(behavior, "jumpChance", b.jumpChance);
+	readField(behavior, "cooldown", b.cooldown);
+	readField(behavior, "cooldownJitter", b.cooldownJitter);
+	readField(behavior, "retry", b.retry);
+	readField(behavior, "timeJitter", b.timeJitter);
+	auto &j = type.jump;
+	readField(jump, "height", j.height);
+	readField(jump, "distance", j.distance);
+	readField(jump, "minDistance", j.minDistance);
+	readField(jump, "minHeight", j.minHeight);
+	readField(jump, "maxHeight", j.maxHeight);
+	readField(jump, "gravity", j.gravity);
+	readField(jump, "clearance", j.clearance);
+	readField(jump, "probeStep", j.probeStep);
+	readField(jump, "landGap", j.landGap);
+	readField(jump, "landGapJitter", j.landGapJitter);
+	readField(jump, "landAngleJitter", j.landAngleJitter);
+	readField(jump, "landTries", j.landTries);
+}
+
+// PMXの歩き(enemies.lua の gait・bones の表。ボーンはMMDの名前)
+void readGait(const sol::optional<sol::table> &gait, const sol::optional<sol::table> &bones, EnemyType &type)
+{
+	readField(gait, "stride", type.gait.stride);
+	readField(gait, "legSwing", type.gait.legSwing);
+	readField(gait, "kneeBend", type.gait.kneeBend);
+	readField(gait, "ankle", type.gait.ankle);
+	readField(gait, "armSwing", type.gait.armSwing);
+	readField(gait, "armDown", type.gait.armDown);
+	readField(gait, "elbowBend", type.gait.elbowBend);
+	readField(gait, "twist", type.gait.twist);
+	readField(gait, "lean", type.gait.lean);
+	readField(gait, "bob", type.gait.bob);
+	readField(gait, "sway", type.gait.sway);
+	readField(gait, "blend", type.gait.blend);
+	type.gait.stride = std::max(type.gait.stride, 0.05f);
+	readField(bones, "center", type.bones.center);
+	readField(bones, "upper", type.bones.upper);
+	readField(bones, "lower", type.bones.lower);
+	readField(bones, "rightLeg", type.bones.rightLeg);
+	readField(bones, "leftLeg", type.bones.leftLeg);
+	readField(bones, "rightKnee", type.bones.rightKnee);
+	readField(bones, "leftKnee", type.bones.leftKnee);
+	readField(bones, "rightAnkle", type.bones.rightAnkle);
+	readField(bones, "leftAnkle", type.bones.leftAnkle);
+	readField(bones, "rightArm", type.bones.rightArm);
+	readField(bones, "leftArm", type.bones.leftArm);
+	readField(bones, "rightElbow", type.bones.rightElbow);
+	readField(bones, "leftElbow", type.bones.leftElbow);
+}
+
+// 休止ポーズのメッシュの範囲(モデルの単位。全部の頂点を囲む、軸に平行な箱)
+struct MeshBounds
+{
+	float min[3] = {0.0f, 0.0f, 0.0f};
+	float max[3] = {0.0f, 0.0f, 0.0f};
+};
+MeshBounds measureMesh(const std::vector<model::ModelVertex> &vertices)
+{
+	MeshBounds bounds;
+	for(size_t i = 0; i < vertices.size(); ++i){
+		for(int k = 0; k < 3; ++k){
+			const float v = vertices[i].position[k];
+			bounds.min[k] = i == 0 ? v : std::min(bounds.min[k], v);
+			bounds.max[k] = i == 0 ? v : std::max(bounds.max[k], v);
+		}
+	}
+	return bounds;
 }
 
 int findBone(const model::Skeleton &skeleton, const std::string &name, const std::string &kindName)
@@ -340,91 +222,50 @@ std::vector<EnemyType> loadEnemyTypes(const std::string &relativePath)
 		const sol::table &t = *entry;
 		EnemyType type;
 		type.name = t.get_or("name", std::string("enemy"));
-		if(const sol::optional<sol::table> creature = t["creature"]){
-			type.creature = readCreatureSpec(*creature);
-		}
-		type.model = t.get_or("model", std::string());
-		type.count = std::max(t.get_or("count", 0), 0);
-		type.seed = t.get_or("seed", type.seed);
-		readFloat(t, "height", type.height);
-		readFloat(t, "length", type.length);
-		readFloat(t, "speed", type.speed);
-		readFloat(t, "speedJitter", type.speedJitter);
-		readFloat(t, "turnSpeed", type.turnSpeed);
-		readFloat(t, "spawnMinRadius", type.spawnMinRadius);
-		readFloat(t, "spawnRadius", type.spawnRadius);
-		readFloat(t, "stopDistance", type.stopDistance);
-		readFloat(t, "stopJitter", type.stopJitter);
-		readFloat(t, "cameraCullRadius", type.cameraCullRadius);
-		readFloat(t, "shadowRadius", type.shadowRadius);
-		readFloat(t, "shadowOpacity", type.shadowOpacity);
-		const sol::optional<sol::table> gait = t["gait"], lod = t["lod"], bones = t["bones"], box = t["box"];
-		readFloat(box, "width", type.box.width);
-		readFloat(box, "length", type.box.length);
-		readFloat(box, "height", type.box.height);
-		readFloat(box, "fallLength", type.box.fallLength);
-		readFloat(lod, "near", type.lod.near);
-		readFloat(lod, "far", type.lod.far);
-		readFloat(lod, "interval", type.lod.interval);
-		if(type.creature){
-			readCreatureMotion(t, type);
-			readClipMotion(t, type.clipMotion);
-			result.push_back(std::move(type));
-			continue;
-		}
-		// PMXの体: gait はMMDの名前のボーンの歩き
-		readFloat(gait, "stride", type.gait.stride);
-		readFloat(gait, "legSwing", type.gait.legSwing);
-		readFloat(gait, "kneeBend", type.gait.kneeBend);
-		readFloat(gait, "ankle", type.gait.ankle);
-		readFloat(gait, "armSwing", type.gait.armSwing);
-		readFloat(gait, "armDown", type.gait.armDown);
-		readFloat(gait, "elbowBend", type.gait.elbowBend);
-		readFloat(gait, "twist", type.gait.twist);
-		readFloat(gait, "lean", type.gait.lean);
-		readFloat(gait, "bob", type.gait.bob);
-		readFloat(gait, "sway", type.gait.sway);
-		readFloat(gait, "blend", type.gait.blend);
-		readString(bones, "center", type.bones.center);
-		readString(bones, "upper", type.bones.upper);
-		readString(bones, "lower", type.bones.lower);
-		readString(bones, "rightLeg", type.bones.rightLeg);
-		readString(bones, "leftLeg", type.bones.leftLeg);
-		readString(bones, "rightKnee", type.bones.rightKnee);
-		readString(bones, "leftKnee", type.bones.leftKnee);
-		readString(bones, "rightAnkle", type.bones.rightAnkle);
-		readString(bones, "leftAnkle", type.bones.leftAnkle);
-		readString(bones, "rightArm", type.bones.rightArm);
-		readString(bones, "leftArm", type.bones.leftArm);
-		readString(bones, "rightElbow", type.bones.rightElbow);
-		readString(bones, "leftElbow", type.bones.leftElbow);
+		readField(entry, "model", type.model);
 		if(type.model.empty()){
-			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "enemy table: '%s' has no creature or model (%s)", type.name.c_str(), relativePath.c_str());
+			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "enemy table: '%s' has no model (%s)", type.name.c_str(), relativePath.c_str());
 			continue;
 		}
-		type.gait.stride = std::max(type.gait.stride, 0.05f);
+		type.count = std::max(t.get_or("count", 0), 0);
+		readField(entry, "seed", type.seed);
+		readField(entry, "height", type.height);
+		readField(entry, "length", type.length);
+		readField(entry, "speed", type.speed);
+		readField(entry, "speedJitter", type.speedJitter);
+		readField(entry, "turnSpeed", type.turnSpeed);
+		readField(entry, "spawnMinRadius", type.spawnMinRadius);
+		readField(entry, "spawnRadius", type.spawnRadius);
+		readField(entry, "stopDistance", type.stopDistance);
+		readField(entry, "stopJitter", type.stopJitter);
+		readField(entry, "cameraCullRadius", type.cameraCullRadius);
+		readField(entry, "shadowRadius", type.shadowRadius);
+		readField(entry, "shadowOpacity", type.shadowOpacity);
+		readField(entry, "motionBlend", type.motionBlend);
+		const sol::optional<sol::table> box = t["box"], lod = t["lod"], motions = t["motions"];
+		readField(box, "width", type.box.width);
+		readField(box, "length", type.box.length);
+		readField(box, "height", type.box.height);
+		readField(box, "fallLength", type.box.fallLength);
+		readField(lod, "near", type.lod.near);
+		readField(lod, "far", type.lod.far);
+		readField(lod, "interval", type.lod.interval);
+		// motions か clips があれば、クリップで動かす(クリップの既定は、model と同じファイル)。無ければ、PMXの歩き
+		const sol::optional<std::string> clips = t["clips"];
+		if(motions || clips){
+			readClipMotion(t, motions, clips.value_or(type.model), type.clipMotion);
+			readBehavior(t["behavior"], t["jump"], type);
+		}
+		else{
+			readGait(t["gait"], t["bones"], type);
+		}
 		result.push_back(std::move(type));
 	}
 	return result;
 }
 
-// 大きさ: 体長(前後の長さ)か、背の高さ(頂点の最大の高さ)に合わせる
-EnemySize measureEnemy(const EnemyType &type, const std::vector<model::ModelVertex> &vertices)
-{
-	EnemySize size;
-	float front = 0.0f, back = 0.0f;
-	for(const auto &vertex : vertices){
-		size.top = std::max(size.top, vertex.position[1]);
-		front = std::min(front, vertex.position[2]);
-		back = std::max(back, vertex.position[2]);
-		size.side = std::max(size.side, std::fabs(vertex.position[0]));
-	}
-	size.length = back - front;
-	size.scale = type.length > 0.0f && size.length > 0.0f ? type.length / size.length : (size.top > 0.0f ? type.height / size.top : 1.0f);
-	return size;
-}
-
-// モデルから、大きさ・見えるかの判定の球・動かすボーンを求める。ボーンの無いモデルはfalse
+// モデルから、大きさ・地面に置く高さ・当たりの箱・影・見えるかの判定の球と、動き(クリップか、PMXの歩きのボーン)を求める。
+// 形から決まる値は、休止ポーズのメッシュの範囲から(表に書いた値があれば、そちら)。ボーンの無いモデル・クリップが読めないモデルはfalse
 bool EnemyHorde::setupKind(Kind &kind, VulkanModel &model)
 {
 	auto *skeleton = model.skeleton();
@@ -434,47 +275,46 @@ bool EnemyHorde::setupKind(Kind &kind, VulkanModel &model)
 		return false;
 	}
 	const auto &vertices = model.data().vertices;
-	const EnemySize size = measureEnemy(kind.def, vertices);
-	const float top = size.top, modelLength = size.length, side = size.side;
-	kind.scale = size.scale;
-	// 当たりの箱: 表に無ければ、全部の頂点を囲む大きさ
-	const auto &box = kind.def.box;
-	kind.boxWidth = box.width > 0.0f ? box.width : 2.0f * side * kind.scale;
-	kind.boxLength = box.length > 0.0f ? box.length : modelLength * kind.scale;
-	kind.boxHeight = box.height > 0.0f ? box.height : top * kind.scale;
+	const MeshBounds mesh = measureMesh(vertices);
+	const float width = mesh.max[0] - mesh.min[0], height = mesh.max[1] - mesh.min[1], length = mesh.max[2] - mesh.min[2];
+	// 大きさ: 体長(前後の長さ)か、背の高さに合わせる(どちらも無ければ、モデルの単位のまま = glb はメートル)
+	const auto &def = kind.def;
+	kind.scale = def.length > 0.0f && length > 0.0f ? def.length / length : (def.height > 0.0f && height > 0.0f ? def.height / height : 1.0f);
+	kind.groundY = mesh.min[1];
+	// 当たりの箱: 表に無ければ、メッシュの範囲。中心は、メッシュの左右・前後の範囲の中心(モデルの正面は -Z)
+	const float scale = kind.scale;
+	kind.boxWidth = def.box.width > 0.0f ? def.box.width : width * scale;
+	kind.boxLength = def.box.length > 0.0f ? def.box.length : length * scale;
+	kind.boxHeight = def.box.height > 0.0f ? def.box.height : height * scale;
+	kind.boxSide = 0.5f * (mesh.min[0] + mesh.max[0]) * scale;
+	kind.boxForward = -0.5f * (mesh.min[2] + mesh.max[2]) * scale;
+	kind.shadowRadius = def.shadowRadius > 0.0f ? def.shadowRadius : 0.25f * (kind.boxWidth + kind.boxLength);
 	// 見えるかの判定の球: 足元の真上、高さの半分を中心に、全部の頂点を囲む(手足を動かした分の余裕を足す)
+	const float midY = 0.5f * (mesh.min[1] + mesh.max[1]);
 	float radius2 = 0.0f;
 	for(const auto &vertex : vertices){
-		const float dy = vertex.position[1] - 0.5f * top;
+		const float dy = vertex.position[1] - midY;
 		radius2 = std::max(radius2, vertex.position[0] * vertex.position[0] + dy * dy + vertex.position[2] * vertex.position[2]);
 	}
-	kind.boundY = 0.5f * top * kind.scale;
-	kind.boundRadius = std::max(1.2f * std::sqrt(radius2) * kind.scale, kind.def.shadowRadius);
+	kind.boundY = (midY - kind.groundY) * scale;
+	kind.boundRadius = std::max(1.2f * std::sqrt(radius2) * scale, kind.shadowRadius);
 	kind.bodyRadius = 0.5f * std::min(kind.boxWidth, kind.boxLength);
-	SDL_Log("enemy '%s': model height %.2f, length %.2f units -> scale %.4f (%.2f m tall, %.2f m long, %.2f m wide), %zu vertices, box %.2f x %.2f x %.2f m",
-		name.c_str(), top, modelLength, kind.scale, top * kind.scale, modelLength * kind.scale, 2.0f * side * kind.scale, vertices.size(),
-		kind.boxWidth, kind.boxLength, kind.boxHeight);
-	if(kind.def.creature){
-		// clips があれば、クリップの再生で動かす(読めなければ、数式で動かす)
-		const CreatureMotion &motion = kind.def.creatureMotion;
-		const CreatureClipMotion &clipMotion = kind.def.clipMotion;
-		if(!clipMotion.path.empty()){
-			auto clips = std::make_shared<const std::vector<model::AnimationClip>>(model::loadAnimationClips(ResourcePaths::resource(clipMotion.path.c_str())));
-			if(!clips->empty()){
-				kind.creature = std::make_unique<CreatureClipAnimator>(clips, *skeleton, clipMotion, motion.walkFast.speed, motion.walkSlow.speed, motion.blend,
-					1.0f / kind.scale);
-				SDL_Log("enemy '%s': creature moved by %zu clips (%s)", name.c_str(), clips->size(), clipMotion.path.c_str());
-			}
-		}
-		if(!kind.creature){
-			auto animator = std::make_unique<CreatureAnimator>(*skeleton, vertices, motion, 1.0f / kind.scale);
-			SDL_Log("enemy '%s': creature with %zu legs (procedural motion)", name.c_str(), animator->legCount());
-			kind.creature = std::move(animator);
-		}
-	}
-	else{
+	SDL_Log("enemy '%s': model %.2f x %.2f x %.2f units (w x h x l) -> scale %.4f (%.2f m long), %zu vertices, %zu bones, box %.2f x %.2f x %.2f m, shadow %.2f m",
+		name.c_str(), width, height, length, scale, length * scale, vertices.size(), skeleton->boneCount(), kind.boxWidth, kind.boxLength, kind.boxHeight,
+		kind.shadowRadius);
+	const CreatureClipMotion &clipMotion = def.clipMotion;
+	if(clipMotion.path.empty()){
 		setupPmxBones(kind, *skeleton);
+		return true;
 	}
+	// クリップの長さの単位は、モデルと同じ(glb のメートルなど)
+	auto clips = std::make_shared<const std::vector<model::AnimationClip>>(model::loadAnimationClips(ResourcePaths::resource(clipMotion.path.c_str())));
+	if(clips->empty()){
+		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "enemy '%s': no animation clips in %s", name.c_str(), clipMotion.path.c_str());
+		return false;
+	}
+	kind.creature = std::make_unique<CreatureClipAnimator>(clips, *skeleton, clipMotion, def.behavior.fastSpeed, def.behavior.slowSpeed, def.motionBlend, 1.0f);
+	SDL_Log("enemy '%s': moved by %zu clips (%s)", name.c_str(), clips->size(), clipMotion.path.c_str());
 	return true;
 }
 
@@ -524,16 +364,12 @@ EnemyHorde::EnemyHorde(SDL_::VulkanWindow &window, ResourceSet &resources, const
 		std::uniform_real_distribution<float> unit(0.0f, 1.0f);
 		const size_t kindIndex = kinds_.size();
 		const size_t firstEnemy = enemies_.size();
-		// 丸い生き物の体は、形の表からモデルデータを1つ作り、全部の個体で共有する(GPUのバッファは個体ごと)
-		const std::shared_ptr<const model::ModelData> creatureData = type.creature ? model::buildCreature(*type.creature, type.name) : nullptr;
+		// モデルのデータは、ファイルから1回だけ読み、全部の個体で共有する(GPUのバッファは個体ごと)
 		for(int i = 0; i < type.count; ++i){
-			auto model = creatureData
-				? VulkanModel::create(window.getContext(), window.getBonePool(), window.getTexturePool(), creatureData,
-					[](const std::string &){ return std::shared_ptr<VulkanTexture>(); }, SDL_::VulkanWindow::kFrameSlots)
-				: createVulkanModel(window, resources, type.model);
+			auto model = createVulkanModel(window, resources, type.model);
 			if(!model){
-				SDL_LogError(SDL_LOG_CATEGORY_ERROR, "enemy '%s': failed to create the model %s (%d of %d)", type.name.c_str(),
-					creatureData ? "(creature)" : type.model.c_str(), i, type.count);
+				SDL_LogError(SDL_LOG_CATEGORY_ERROR, "enemy '%s': failed to create the model %s (%d of %d)", type.name.c_str(), type.model.c_str(), i,
+					type.count);
 				break;
 			}
 			if(i == 0 && !setupKind(kind, *model)){
@@ -556,7 +392,7 @@ EnemyHorde::EnemyHorde(SDL_::VulkanWindow &window, ResourceSet &resources, const
 			enemy.speedScale = 1.0f + type.speedJitter * (unit(rng) * 2.0f - 1.0f);
 			enemy.stopDistance = type.stopDistance + type.stopJitter * unit(rng);
 			enemy.poseTimer = type.lod.interval * unit(rng); // 間引くときの更新の時期を、個体ごとにずらす
-			// 丸い生き物の体: 早歩きか、ゆっくり歩きか、待機・攻撃の速さ・時計・最初に攻撃を試すまでの時間の個体差(全員が揃って動かないように)
+			// クリップで動かす体: 早歩きか、ゆっくり歩きか、待機・攻撃の速さ・時計・最初に攻撃を試すまでの時間の個体差(全員が揃って動かないように)
 			const auto &behavior = type.behavior;
 			enemy.fast = unit(rng) < behavior.fastRatio;
 			enemy.creature.rate = 1.0f + behavior.timeJitter * (unit(rng) * 2.0f - 1.0f);
@@ -569,7 +405,8 @@ EnemyHorde::EnemyHorde(SDL_::VulkanWindow &window, ResourceSet &resources, const
 			continue;
 		}
 		// 2体の箱が重なりうる、位置の間の距離の最大(箱の、位置からいちばん遠い角まで ×2。倒れ込みで前へ伸ばす分を含む)
-		gridCell_ = std::max(gridCell_, 2.0f * std::hypot(0.5f * kind.boxWidth, 0.5f * kind.boxLength + std::max(type.box.fallLength, 0.0f)));
+		gridCell_ = std::max(gridCell_, 2.0f * std::hypot(0.5f * kind.boxWidth + std::fabs(kind.boxSide),
+			0.5f * kind.boxLength + std::fabs(kind.boxForward) + std::max(type.box.fallLength, 0.0f)));
 		kinds_.push_back(std::move(kind));
 		SDL_Log("enemy '%s': %zu spawned", type.name.c_str(), enemies_.size() - firstEnemy);
 	}
@@ -593,7 +430,7 @@ EnemyHorde::EnemyHorde(SDL_::VulkanWindow &window, ResourceSet &resources, const
 
 EnemyHorde::~EnemyHorde() = default;
 
-// 個体の当たりの箱: 向き(yaw)に合わせて回した箱(幅×長さ)を囲む、軸に平行な箱。攻撃Aで前へ倒れ込んでいる間は、倒れた度合いだけ前へ伸ばす。
+// 個体の当たりの箱: 向き(yaw)に合わせて回した箱(幅×長さ。中心は、メッシュの範囲の中心)を囲む、軸に平行な箱。攻撃Aで前へ倒れ込んでいる間は、倒れた度合いだけ前へ伸ばす。
 // 跳んでいる間は判定しない(他の敵の上を越える)
 EnemyHorde::Collider EnemyHorde::colliderOf(const Enemy &enemy) const
 {
@@ -613,9 +450,10 @@ EnemyHorde::Collider EnemyHorde::colliderOf(const Enemy &enemy) const
 	}
 	const float extra = std::max(kind.def.box.fallLength, 0.0f) * fallen;
 	const float halfWidth = 0.5f * kind.boxWidth, halfLength = 0.5f * (kind.boxLength + extra);
-	const float forwardX = std::sin(enemy.yaw), forwardZ = std::cos(enemy.yaw); // 体の正面の向き
-	collider.offsetX = 0.5f * extra * forwardX;
-	collider.offsetZ = 0.5f * extra * forwardZ;
+	const float forwardX = std::sin(enemy.yaw), forwardZ = std::cos(enemy.yaw); // 体の正面の向き(左は (forwardZ, -forwardX))
+	const float forward = kind.boxForward + 0.5f * extra;
+	collider.offsetX = forward * forwardX + kind.boxSide * forwardZ;
+	collider.offsetZ = forward * forwardZ - kind.boxSide * forwardX;
 	collider.halfX = std::fabs(forwardZ) * halfWidth + std::fabs(forwardX) * halfLength;
 	collider.halfZ = std::fabs(forwardX) * halfWidth + std::fabs(forwardZ) * halfLength;
 	collider.bottom = enemy.y;
@@ -746,7 +584,7 @@ float EnemyHorde::overlapAt(const Enemy &self, float x, float z) const
 // landTries 個の候補から、他の敵の箱と重ならない(全部重なるなら、重なりのいちばん小さい)候補を選ぶ
 void EnemyHorde::chooseLanding(const Kind &kind, Enemy &enemy, float targetX, float targetZ, const field::FieldMap &map)
 {
-	const auto &j = kind.def.creatureMotion.jump;
+	const auto &j = kind.def.jump;
 	std::uniform_real_distribution<float> jitter(-1.0f, 1.0f);
 	const float fieldW = map.width() * map.cellSize(), fieldD = map.depth() * map.cellSize();
 	const float away = std::atan2(enemy.x - targetX, enemy.z - targetZ);
@@ -788,10 +626,9 @@ void EnemyHorde::update(float dt, const field::FieldMap &map, const field::Movem
 		if(enemy.moving ? distance <= enemy.stopDistance : distance > enemy.stopDistance + kStopHysteresis){
 			enemy.moving = !enemy.moving;
 		}
-		// 丸い生き物の体が攻撃している間は、攻撃の動きだけ(歩き・押し合い・向きの変化は止める)
+		// クリップで動かす体が攻撃している間は、攻撃の動きだけ(歩き・押し合い・向きの変化は止める)
 		if(!kind.creature || !updateCreature(kind, enemy, dt, distance, dx, dz, map, rules, props)){
-			const auto &creatureMotion = def.creatureMotion;
-			const float baseSpeed = !kind.creature ? def.speed : (enemy.fast ? creatureMotion.walkFast.speed : creatureMotion.walkSlow.speed);
+			const float baseSpeed = !kind.creature ? def.speed : (enemy.fast ? def.behavior.fastSpeed : def.behavior.slowSpeed);
 			const float speed = baseSpeed * enemy.speedScale;
 			float vx = 0.0f, vz = 0.0f;
 			if(enemy.moving && distance > 1e-4f){
@@ -809,7 +646,7 @@ void EnemyHorde::update(float dt, const field::FieldMap &map, const field::Movem
 				enemy.yaw = approachAngle(enemy.yaw, std::atan2(dx, dz), def.turnSpeed * dt);
 			}
 			if(kind.creature){
-				// 丸い生き物の体: 歩いている間は、早歩きか、ゆっくり歩き。止まったら待機
+				// クリップで動かす体: 歩いている間は、早歩きか、ゆっくり歩き。止まったら待機
 				using Motion = CreatureDriver::Motion;
 				kind.creature->play(enemy.creature, enemy.moving ? (enemy.fast ? Motion::WalkFast : Motion::WalkSlow) : Motion::Idle);
 				kind.creature->advance(enemy.creature, dt, speed);
@@ -842,7 +679,7 @@ bool EnemyHorde::planJump(const Kind &kind, Enemy &enemy, const field::FieldMap 
 	bool hopInPlace)
 {
 	constexpr float kShorten[] = {1.0f, 0.8f, 0.6f, 0.4f}; // 距離を縮めて試す割合
-	const auto &j = kind.def.creatureMotion.jump;
+	const auto &j = kind.def.jump;
 	const float fromX = enemy.x, fromZ = enemy.z, fromY = map.heightAt(fromX, fromZ);
 	const float dx = enemy.jumpToX - fromX, dz = enemy.jumpToZ - fromZ, full = std::hypot(dx, dz);
 	const float step = std::max(j.probeStep, 0.05f);
@@ -896,7 +733,7 @@ bool EnemyHorde::planJump(const Kind &kind, Enemy &enemy, const field::FieldMap 
 	return false;
 }
 
-// 丸い生き物の体の攻撃。攻撃している間は true(跳ぶ攻撃なら、跳び立つ点から着地点(chooseLanding・planJump)へ、位置を放物線で動かす)。
+// クリップで動かす体の攻撃。攻撃している間は true(跳ぶ攻撃なら、跳び立つ点から着地点(chooseLanding・planJump)へ、位置を放物線で動かす)。
 // 攻撃していなければ、時期(cooldown)になったら、プレイヤーとの距離に応じて、確率で攻撃を始める(跳ぶ攻撃は、跳べる経路が無ければ始めない)。
 // 攻撃が終わったら false(呼び出し側が歩き・待機に戻す)
 bool EnemyHorde::updateCreature(const Kind &kind, Enemy &enemy, float dt, float distance, float dx, float dz, const field::FieldMap &map,
@@ -1064,15 +901,15 @@ void EnemyHorde::draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewPro
 			applyPose(kind, enemy);
 			enemy.poseDue = false;
 			enemy.poseTimer = 0.0f;
-			enemy.posedStill = !kind.creature && enemy.walkWeight <= kStillWeight; // 丸い生き物の体は、止まっても動き続ける
+			enemy.posedStill = !kind.creature && enemy.walkWeight <= kStillWeight; // クリップで動かす体は、止まっても動き続ける
 		}
-		transform_.setPos(geo::Vector3f(enemy.x, enemy.y, enemy.z));
-		transform_.setRotation(geo::Quaternionf::createRotater(enemy.yaw, geo::Vector3f(0.0f, 1.0f, 0.0f)));
-		// 倒れ込み・着地の潰れ(地面 = モデルの Y=0 を基準に、高さを縮めて前後・左右へ広げる。地面にめり込まず、浮かない)
+		// 倒れ込み・着地の潰れ(地面 = 休止ポーズのメッシュのいちばん低い点 groundY を基準に、高さを縮めて前後・左右へ広げる。地面にめり込まず、浮かない)
 		const CreatureDriver::BodyScale squash = kind.creature ? kind.creature->bodyScale(enemy.creature) : CreatureDriver::BodyScale{};
+		transform_.setPos(geo::Vector3f(enemy.x, enemy.y - kind.groundY * kind.scale * squash.vertical, enemy.z));
+		transform_.setRotation(geo::Quaternionf::createRotater(enemy.yaw, geo::Vector3f(0.0f, 1.0f, 0.0f)));
 		transform_.setScale(geo::Vector3f(kind.scale * squash.horizontal, kind.scale * squash.vertical, kind.scale * squash.horizontal));
 		window.draw(enemy.model, viewProj, transform_.getMatrix());
-		shadow.draw(window, viewProj, enemy.x, enemy.y, enemy.z, kind.def.shadowRadius, kind.def.shadowOpacity);
+		shadow.draw(window, viewProj, enemy.x, enemy.y, enemy.z, kind.shadowRadius, kind.def.shadowOpacity);
 	}
 }
 
