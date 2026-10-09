@@ -44,6 +44,8 @@ public:
     // 現在のSceneのonIdle()。Sceneが無ければfalse
 	bool onIdle(uint32_t tick);
 
+	// Sceneの遷移(破棄・予約Sceneの開始・スタックからの復元)を解決する。
+	// onSuspend()は、Active→Suspendedの遷移(現在のSceneを積む・破棄する)でだけ呼ぶ。積まれていた(Suspended)Sceneの破棄は、onDestroy()だけ
 	void updateScenes(uint32_t tick);
 
 	// stackResumeScene_を、古い方(根本)からkeepCount個だけ残して新しい方を
@@ -59,9 +61,6 @@ public:
 	void swap();
 
 private:
-	// onDestroyだけを呼ぶ。onSuspendはActive→Suspendedの遷移でだけ呼ぶ契約
-	static void destroyScene(Scene &scene, uint32_t tick);
-
 	SDL_::Window &owner_;
 	Application *app_ = nullptr;
 	Resources *res_ = nullptr;

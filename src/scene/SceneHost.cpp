@@ -29,7 +29,7 @@ void SceneHost::updateScenes(uint32_t tick)
 	for (;;) {
 		if (currentScene_ && currentScene_->isFinished()) {
 			currentScene_->onSuspend();
-			destroyScene(*currentScene_, tick);
+			currentScene_->onDestroy(tick);
 			currentScene_.reset();
 		}
 
@@ -60,12 +60,6 @@ void SceneHost::updateScenes(uint32_t tick)
 	}
 }
 
-// onSuspendはActive→Suspendedの遷移でだけ呼ぶ。ここはonDestroyだけ
-void SceneHost::destroyScene(Scene &scene, uint32_t tick)
-{
-	scene.onDestroy(tick);
-}
-
 void SceneHost::clearResumeStack(size_t keepCount)
 {
 	const auto tick = ::SDL_GetTicks();
@@ -73,7 +67,7 @@ void SceneHost::clearResumeStack(size_t keepCount)
 		auto scene = std::move(stackResumeScene_.top());
 		stackResumeScene_.pop();
 		// 積まれていた時点でonSuspend済み。ここではonDestroyだけ
-		destroyScene(*scene, tick);
+		scene->onDestroy(tick);
 	}
 	if (currentScene_) {
 		currentScene_->finish();
@@ -87,7 +81,7 @@ void SceneHost::terminate()
 	if (currentScene_) {
 		const auto tick = ::SDL_GetTicks();
 		currentScene_->onSuspend();
-		destroyScene(*currentScene_, tick);
+		currentScene_->onDestroy(tick);
 	}
 	currentScene_.reset();
 	clearResumeStack();
