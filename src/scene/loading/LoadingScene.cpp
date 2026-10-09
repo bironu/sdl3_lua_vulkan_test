@@ -21,7 +21,13 @@ void LoadingScene::onCreate(uint32_t tick)
 	// 読み込みは別スレッドで(GPUの資源は触らない。GameScene::onCreateでメインスレッドが作る)
 	preload_ = std::make_unique<ResourceSet>(getResources());
 	worker_ = std::thread([this]{
-		preload_->loadManifest(GameScene::kAssetManifest);
+		// 例外が漏れるとstd::terminateになる。失敗しても、ロード画面から進めなくならないよう、必ずdone_を立てる
+		try{
+			preload_->loadManifest(GameScene::kAssetManifest);
+		}
+		catch(const std::exception &e){
+			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to preload assets: %s", e.what());
+		}
 		done_ = true;
 	});
 }

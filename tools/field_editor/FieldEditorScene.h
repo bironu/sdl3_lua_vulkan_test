@@ -36,7 +36,6 @@ public:
 	~FieldEditorScene() override;
 
 	void dispatch(const SDL_Event &) override;
-	void onSuspend() override {}
 	void onCreate(uint32_t tick) override;
 	bool onIdle(uint32_t tick) override;
 

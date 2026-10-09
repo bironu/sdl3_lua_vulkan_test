@@ -101,13 +101,13 @@ void FieldRenderer::build(const field::FieldMap &map, int chunkX, int chunkZ)
 	}
 }
 
-void FieldRenderer::draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewProj) const
+void FieldRenderer::draw(const geo::Matrix4x4f &viewProj) const
 {
 	const auto identity = geo::createIdentityMatrix4x4<float>();
 	for(const auto &chunk : meshes_){
 		for(size_t type = 0; type < chunk.size(); ++type){
 			if(chunk[type]){
-				window.draw(chunk[type], viewProj, identity, materials_[type]);
+				window_.draw(chunk[type], viewProj, identity, materials_[type]);
 			}
 		}
 	}

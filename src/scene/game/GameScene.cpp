@@ -5,12 +5,12 @@
 #include "resources/ResourceSet.h"
 #include "sdl/SDLGamepad.h"
 #include "resources/Resources.h"
-#include "sdl/SDLImage.h"
 #include "sdl/SDLVulkanWindow.h"
 #include "ui/PadNames.h"
 #include "scene/character/CharacterList.h"
 #include "scene/characterselect/CharacterSelectScene.h"
 #include "scene/common/ModelFactory.h"
+#include "scene/common/ScreenCoords.h"
 #include "scene/game/GameSession.h"
 #include "scene/SceneHost.h"
 #include "scene/SceneRegistry.h"
@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,7 @@ namespace game
 
 namespace
 {
-constexpr float kPi = 3.14159265f;
+constexpr float kPi = std::numbers::pi_v<float>;
 
 SDL_::VulkanWindow &vulkanWindow(Scene &scene)
 {
@@ -47,10 +48,13 @@ float approachAngle(float a, float target, float maxStep)
 	diff -= kPi;
 	return a + std::clamp(diff, -maxStep, maxStep);
 }
+
+// なめらかに始まり、なめらかに終わる補間関数(t=0〜1)
+float smoothstep01(float t)
+{
+	return t * t * (3.0f - 2.0f * t);
 }
 
-namespace
-{
 // モーションのパス(game.assets.lua と同じパス)
 constexpr const char *kMotionPaths[] = {
 	"res/motion/Standing Idle.vrma",   // 立ち
@@ -69,13 +73,6 @@ constexpr const char *kMotionPaths[] = {
 GameScene::GameScene() = default;
 
 GameScene::~GameScene() = default;
-
-void GameScene::toScreen(float windowX, float windowY, float &x, float &y)
-{
-	const auto size = getWindow().getSize();
-	x = windowX / static_cast<float>(std::max(size.getX(), 1)) * uiContext_->screenWidth();
-	y = windowY / static_cast<float>(std::max(size.getY(), 1)) * uiContext_->screenHeight();
-}
 
 void GameScene::setPaused(bool paused)
 {
@@ -162,22 +159,20 @@ void GameScene::dispatch(const SDL_Event &event)
 	}
 	case SDL_EVENT_MOUSE_MOTION: {
 		if(paused_){
-			float x, y;
-			toScreen(event.motion.x, event.motion.y, x, y);
+			const auto [x, y] = windowToScreen(getWindow(), *uiContext_, event.motion.x, event.motion.y);
 			pauseMenu_->onMouseMove(x, y);
 			break;
 		}
 		// 視点の回転(マウスはウィンドウに取り込み済み): 右へ動かすと右を向く、下へ動かすと見下ろす
 		const float kRadiansPerPixel = 0.003f * sensitivity_;
 		cameraYaw_ -= event.motion.xrel * kRadiansPerPixel;
-		cameraPitch_ = std::clamp(cameraPitch_ + event.motion.yrel * kRadiansPerPixel, kMinPitch, 1.3f);
+		cameraPitch_ = std::clamp(cameraPitch_ + event.motion.yrel * kRadiansPerPixel, kMinPitch, kMaxPitch);
 		break;
 	}
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP:
 		if(paused_){
-			float x, y;
-			toScreen(event.button.x, event.button.y, x, y);
+			const auto [x, y] = windowToScreen(getWindow(), *uiContext_, event.button.x, event.button.y);
 			pauseMenu_->onMouseButton(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, x, y);
 		}
 		break;
@@ -191,21 +186,18 @@ void GameScene::dispatch(const SDL_Event &event)
 	}
 }
 
-void GameScene::onCreate(uint32_t tick)
+void GameScene::setupLighting(SDL_::VulkanWindow &window)
 {
-	Scene::onCreate(tick);
-	settings_ = loadGameSettings(); // 速さ・カメラ・クロスフェードなどの調整値(res/lua/data/game_settings.lua。F5で読み直す)
-	auto &window = vulkanWindow(*this);
-	auto &res = getResources();
-	window.setScreenSize(static_cast<float>(res.getScreenWidth()), static_cast<float>(res.getScreenHeight()));
-	window.setClearColor(0.55f, 0.7f, 0.9f);
-
 	// ライティング: 軽さを優先して、シャドウマップは使わず、足元の丸い影にする。点光源は無し
 	window.setShadowMapsEnabled(false);
 	window.clearPointLights();
 	window.setAmbientEnvironment(true, geo::Vector3f(0.36f, 0.32f, 0.27f), 0.0f, 0.5f, 0.6f);
 	window.setLight(geo::Vector3f(-0.4f, -1.0f, -0.6f), 0.7f, 0.7f, 0.7f, 0.4f);
 	blob_ = std::make_unique<BlobShadow>(window);
+}
+
+void GameScene::loadField(SDL_::VulkanWindow &window)
+{
 	// 地面: 設定(field_settings.lua)のフィールドを読む。無ければ、既定のタイル(0番)で埋めた平面
 	const field::FieldSettings settings = field::loadFieldSettings();
 	tiles_ = field::loadTileDefs(settings.tiles);
@@ -227,14 +219,16 @@ void GameScene::onCreate(uint32_t tick)
 	startX_ = playerX_;
 	startZ_ = playerZ_;
 	// 動作確認用: VULKAN_START=x,z で、開始位置を指定する(最初の位置へ戻るときも、そこへ戻る)
-	if(const char *start = SDL_getenv("VULKAN_START")){
-		float sx = 0.0f, sz = 0.0f;
-		if(std::sscanf(start, "%f,%f", &sx, &sz) == 2){
-			startX_ = playerX_ = sx;
-			startZ_ = playerZ_ = sz;
-		}
+	automation_ = DebugAutomation::fromEnv();
+	if(const auto &start = automation_.startPosition()){
+		startX_ = playerX_ = start->first;
+		startZ_ = playerZ_ = start->second;
 	}
+}
 
+// プレイヤーのモデルを用意する。作れなかったらfalse
+bool GameScene::loadPlayer(SDL_::VulkanWindow &window)
+{
 	// プレイヤー: キャラクタ選択画面で選んだキャラ(GameSession)。選択画面がGPU上に作ったモデルがあればそれを引き継ぎ、無ければ(データは読み込み済みなら
 	// キャッシュから)ここで作る。シーンの破棄で、まとめて手放される
 	resources().loadManifest(kAssetManifest);
@@ -249,8 +243,7 @@ void GameScene::onCreate(uint32_t tick)
 	}
 	if(!player_){
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to create the player.");
-		quit();
-		return;
+		return false;
 	}
 	{
 		float top = 0.0f;
@@ -260,6 +253,11 @@ void GameScene::onCreate(uint32_t tick)
 		applyModelHeight(top);
 	}
 	player_->setAmbientBoost(0.0f);
+	return true;
+}
+
+void GameScene::loadMotions()
+{
 	if(player_->skeleton()){
 		for(int i = 0; i < MotionCount; ++i){
 			if(const auto animation = resources().animation(kMotionPaths[i])){
@@ -274,6 +272,10 @@ void GameScene::onCreate(uint32_t tick)
 			}
 		}
 	}
+}
+
+void GameScene::measureLoopSeams()
+{
 	// ループのつなぎ目: 最初と最後の姿勢が大きく違う(ループ用に作られていない)モーションを調べる(loopSeam_: 骨の回転の差の合計。ラジアン)。
 	// 差が大きいと、ループの折り返しで姿勢が飛ぶ(登りのモーションが、4秒ごとに唐突に立ち上がって見える原因だった)。そのモーションは、折り返しで混ぜてつなぐ(applyLooped)
 	if(auto *skeleton = player_->skeleton()){
@@ -298,10 +300,10 @@ void GameScene::onCreate(uint32_t tick)
 		}
 		skeleton->resetPose();
 	}
-	playerY_ = map_.heightAt(playerX_, playerZ_);
-	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
-	playerTransform_.setScale(geo::Vector3f(1.0f, 1.0f, 1.0f));
+}
 
+void GameScene::setupUi(SDL_::VulkanWindow &window)
+{
 	// HUD: Luaのウィジェット。スクリプトの読み込み一覧(hud.assets.lua)があれば、先に読む
 	resources().loadManifest("res/lua/ui/hud.assets.lua");
 	uiContext_ = std::make_unique<ui::UiContext>(window, getResources(), resources());
@@ -321,14 +323,37 @@ void GameScene::onCreate(uint32_t tick)
 		}
 	};
 	pauseMenu_ = std::make_unique<ui::UiScript>(*uiContext_, std::move(pauseCallbacks));
+}
+
+void GameScene::onCreate(uint32_t tick)
+{
+	Scene::onCreate(tick);
+	settings_ = loadGameSettings(); // 速さ・カメラ・クロスフェードなどの調整値(res/lua/data/game_settings.lua。F5で読み直す)
+	auto &window = vulkanWindow(*this);
+	auto &res = getResources();
+	window.setScreenSize(static_cast<float>(res.getScreenWidth()), static_cast<float>(res.getScreenHeight()));
+	window.setClearColor(0.55f, 0.7f, 0.9f);
+
+	setupLighting(window);
+	loadField(window);
+	if(!loadPlayer(window)){
+		quit();
+		return;
+	}
+	loadMotions();
+	measureLoopSeams();
+	playerY_ = map_.heightAt(playerX_, playerZ_);
+	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
+	playerTransform_.setScale(geo::Vector3f(1.0f, 1.0f, 1.0f));
+	setupUi(window);
 
 	// 動作確認用: VULKAN_PITCH=ラジアン で、カメラの縦の角度の初期値(例: -0.6 で下から見上げる、-1.57 で真上)
-	if(const char *pitch = SDL_getenv("VULKAN_PITCH")){
-		cameraPitch_ = std::clamp(static_cast<float>(SDL_atof(pitch)), kMinPitch, 1.3f);
+	if(const auto &pitch = automation_.pitch()){
+		cameraPitch_ = std::clamp(*pitch, kMinPitch, kMaxPitch);
 	}
 	// 動作確認用: VULKAN_YAW=ラジアン で、カメラの水平の角度の初期値(例: 1.57 で横から)
-	if(const char *yaw = SDL_getenv("VULKAN_YAW")){
-		cameraYaw_ = static_cast<float>(SDL_atof(yaw));
+	if(const auto &yaw = automation_.yaw()){
+		cameraYaw_ = *yaw;
 	}
 	// マウスをウィンドウに取り込んで、視点の回転に使う
 	SDL_SetWindowRelativeMouseMode(window.get(), true);
@@ -397,6 +422,27 @@ float GameScene::rollProgress(float normalizedTime) const
 	return rollProfile_[i] + (rollProfile_[i + 1] - rollProfile_[i]) * (x - static_cast<float>(i));
 }
 
+float GameScene::loopOverlap(int motion) const
+{
+	const auto &player = motions_[motion];
+	if(!player || loopSeam_[motion] <= settings_.motion.seamThreshold){
+		return 0.0f;
+	}
+	return std::min(settings_.motion.loopBlend, player->duration() * 0.4f);
+}
+
+void GameScene::blendPose(model::Skeleton &skeleton, const Pose &from, float alpha)
+{
+	const size_t limit = std::min(skeleton.boneCount(), from.rotations.size());
+	for(size_t i = 0; i < limit; ++i){
+		const int bone = static_cast<int>(i);
+		const model::Vec3 &fromPos = from.translations[i];
+		const model::Vec3 &toPos = skeleton.boneTranslation(bone);
+		skeleton.setBoneRotation(bone, model::Quat::slerp(from.rotations[i], skeleton.boneRotation(bone), alpha));
+		skeleton.setBoneTranslation(bone, {fromPos.x + (toPos.x - fromPos.x) * alpha, fromPos.y + (toPos.y - fromPos.y) * alpha, fromPos.z + (toPos.z - fromPos.z) * alpha});
+	}
+}
+
 float GameScene::loopLength(int motion) const
 {
 	const auto &player = motions_[motion];
@@ -406,7 +452,7 @@ float GameScene::loopLength(int motion) const
 	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
 		return player->duration();
 	}
-	return player->duration() - std::min(settings_.motion.loopBlend, player->duration() * 0.4f);
+	return player->duration() - loopOverlap(motion);
 }
 
 // つなぎ目を混ぜるループ: 周期 L = 長さ - F。時刻 u が 0〜F の間は、(終わり側 L+u の姿勢)から(始め側 u の姿勢)へ混ぜる(u=0 で前の周期の終わりと、u=F で始めの続きと、ちょうどつながる)
@@ -417,11 +463,11 @@ void GameScene::applyLooped(int motion, float time, model::Skeleton &skeleton, m
 		return;
 	}
 	const float duration = player->duration();
-	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
+	const float overlap = loopOverlap(motion);
+	if(overlap == 0.0f){
 		player->apply(skeleton, morphs, std::min(time, duration));
 		return;
 	}
-	const float overlap = std::min(settings_.motion.loopBlend, duration * 0.4f);
 	const float length = duration - overlap;
 	const float u = std::fmod(time, length);
 	if(u >= overlap){
@@ -434,13 +480,8 @@ void GameScene::applyLooped(int motion, float time, model::Skeleton &skeleton, m
 	skeleton.resetPose();
 	player->apply(skeleton, morphs, u);
 	const float t = u / overlap;
-	const float alpha = t * t * (3.0f - 2.0f * t);
-	for(size_t i = 0; i < skeleton.boneCount(); ++i){
-		const int bone = static_cast<int>(i);
-		const model::Vec3 &from = tail.translations[i], &to = skeleton.boneTranslation(bone);
-		skeleton.setBoneRotation(bone, model::Quat::slerp(tail.rotations[i], skeleton.boneRotation(bone), alpha));
-		skeleton.setBoneTranslation(bone, {from.x + (to.x - from.x) * alpha, from.y + (to.y - from.y) * alpha, from.z + (to.z - from.z) * alpha});
-	}
+	const float alpha = smoothstep01(t);
+	blendPose(skeleton, tail, alpha);
 }
 
 bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
@@ -485,19 +526,19 @@ void GameScene::startAction(int motion, float dirX, float dirZ)
 	}
 }
 
-// 入力に合わせてプレイヤーを動かし、モーションを当てる:
-//   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
-//   歩いて登れない少し急な坂(maxSlope〜maxClimbSlope)へ進む: Climbing Slope(ゆっくり登る)
-//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
-//   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
-void GameScene::updatePlayer(float dt, uint32_t tick)
+// 入力を読む: キーボード・ゲームパッド(視点の回転もここ)・動作確認用の上書き。シーン開始時に押されていたボタンの無視まで行う
+GameScene::PlayerInput GameScene::gatherInput(float dt, uint32_t tick)
 {
+	PlayerInput input;
 	const bool *keys = Application::getKeybordState();
-	float right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
-	float forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
-	bool run = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
-	bool actionDown = keys[SDL_SCANCODE_SPACE];
-	bool attack[4] = {keys[SDL_SCANCODE_X] != 0, keys[SDL_SCANCODE_V] != 0, keys[SDL_SCANCODE_Z] != 0, keys[SDL_SCANCODE_C] != 0}; // R1 R2 L1 L2
+	input.right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
+	input.forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
+	input.run = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+	input.actionDown = keys[SDL_SCANCODE_SPACE];
+	input.attack[0] = keys[SDL_SCANCODE_X] != 0; // R1 R2 L1 L2
+	input.attack[1] = keys[SDL_SCANCODE_V] != 0;
+	input.attack[2] = keys[SDL_SCANCODE_Z] != 0;
+	input.attack[3] = keys[SDL_SCANCODE_C] != 0;
 	// ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックでカメラ(視点)を回す
 	if(const auto pad = getResources().getGamepad()){
 		float lx, ly, rx, ry;
@@ -509,8 +550,8 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		const float stickLength = std::sqrt(lx * lx + ly * ly);
 		stickMoving_ = stickMoving_ ? stickLength >= settings_.input.moveExit : stickLength >= settings_.input.moveEnter;
 		if(stickMoving_){
-			right += lx;
-			forward -= ly; // スティックは下が+
+			input.right += lx;
+			input.forward -= ly; // スティックは下が+
 		}
 		if(stickRunning_){
 			stickDip_ = stickLength >= settings_.input.runExit ? 0.0f : stickDip_ + dt;
@@ -520,106 +561,96 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 			stickRunning_ = stickLength >= settings_.input.runStick;
 			stickDip_ = 0.0f;
 		}
-		run = run || stickRunning_;
+		input.run = input.run || stickRunning_;
 		cameraYaw_ -= rx * settings_.camera.yawSpeed * sensitivity_ * dt;
-		cameraPitch_ = std::clamp(cameraPitch_ + ry * settings_.camera.pitchSpeed * sensitivity_ * dt, kMinPitch, 1.3f);
-		actionDown = actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
-		attack[0] = attack[0] || pad->button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-		attack[1] = attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > settings_.input.triggerOn;
-		attack[2] = attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-		attack[3] = attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
+		cameraPitch_ = std::clamp(cameraPitch_ + ry * settings_.camera.pitchSpeed * sensitivity_ * dt, kMinPitch, kMaxPitch);
+		input.actionDown = input.actionDown || pad->button(SDL_GAMEPAD_BUTTON_SOUTH);
+		input.attack[0] = input.attack[0] || pad->button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+		input.attack[1] = input.attack[1] || pad->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > settings_.input.triggerOn;
+		input.attack[2] = input.attack[2] || pad->button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+		input.attack[3] = input.attack[3] || pad->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > settings_.input.triggerOn;
 	}
-	// 動作確認用: VULKAN_AUTOWALK=1 で、常に前へ進む入力にする。=2 なら常に右へ、=3 なら常に左へ(横から見るため)
-	static const char *autoWalk = SDL_getenv("VULKAN_AUTOWALK");
-	if(autoWalk){
-		forward = (autoWalk[0] == '2' || autoWalk[0] == '3') ? 0.0f : 1.0f;
-		right = autoWalk[0] == '2' ? 1.0f : autoWalk[0] == '3' ? -1.0f : right;
+	// 動作確認用の環境変数(DebugAutomation参照): 入力の上書き(AUTOWALK/AUTORUN)と、アクションのボタン(AUTOACTION)
+	automation_.overrideMove(input.forward, input.right);
+	automation_.overrideRun(input.run);
+	while(const std::string *name = automation_.nextAction(static_cast<int>(tick - startTick_))){
+		pendingAuto_ = *name == "roll" ? MotionRoll : *name == "pr" ? MotionPunchRight : *name == "pl" ? MotionPunchLeft : *name == "kh" ? MotionKickHigh : MotionRoundhouse;
 	}
-	// 動作確認用: VULKAN_AUTORUN=1 で、スティックを最大に倒した入力にする。=2 なら、Aボタンも押しっぱなし(Fast Run)
-	static const char *autoRun = SDL_getenv("VULKAN_AUTORUN");
-	if(autoRun){
-		run = true;
-	}
-	// 動作確認用: VULKAN_AUTOACTION="roll|pr|pl|kh|rh@ミリ秒,..."(時刻の昇順)で、そのアクションのボタンが押されたことにする
-	static const char *autoAction = SDL_getenv("VULKAN_AUTOACTION");
-	if(autoAction){
-		const std::string all(autoAction);
-		std::vector<std::pair<std::string, int>> actions;
-		for(size_t start = 0; start < all.size();){
-			size_t end = all.find(',', start);
-			end = end == std::string::npos ? all.size() : end;
-			const std::string spec = all.substr(start, end - start);
-			const auto at = spec.find('@');
-			if(at != std::string::npos){
-				actions.emplace_back(spec.substr(0, at), std::atoi(spec.c_str() + at + 1));
-			}
-			start = end + 1;
-		}
-		while(autoActionDone_ < actions.size() && static_cast<int>(tick - startTick_) >= actions[autoActionDone_].second){
-			const std::string &name = actions[autoActionDone_++].first;
-			pendingAuto_ = name == "roll" ? MotionRoll : name == "pr" ? MotionPunchRight : name == "pl" ? MotionPunchLeft : name == "kh" ? MotionKickHigh : MotionRoundhouse;
-		}
-	}
-	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
-	const float fx = -std::sin(cameraYaw_), fz = -std::cos(cameraYaw_);
-	const float rx = std::cos(cameraYaw_), rz = -std::sin(cameraYaw_);
-	float dx = fx * forward + rx * right;
-	float dz = fz * forward + rz * right;
-	const float length = std::sqrt(dx * dx + dz * dz);
-	const float magnitude = std::min(length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
-	if(length > 0.0f){
-		dx /= length;
-		dz /= length;
-	}
-
 	// シーンが始まったとき(キャラクタ選択のAボタンなど)に押されていたボタンは、いったん離されるまで無いものとして扱う
 	// (押したままゲームが始まると、離したときに「単押し」とみなされて、転がってしまうため)
 	if(!inputArmed_){
-		if(actionDown || attack[0] || attack[1] || attack[2] || attack[3]){
-			actionDown = attack[0] = attack[1] = attack[2] = attack[3] = false;
+		if(input.actionDown || input.attack[0] || input.attack[1] || input.attack[2] || input.attack[3]){
+			input.actionDown = input.attack[0] = input.attack[1] = input.attack[2] = input.attack[3] = false;
 		}
 		else{
 			inputArmed_ = true;
 		}
 	}
-	if(autoRun && autoRun[0] == '2'){
-		actionDown = true; // 動作確認用: Aボタンを押しっぱなし
+	if(automation_.holdAction()){
+		input.actionDown = true; // 動作確認用: Aボタンを押しっぱなし
 	}
-	// ボタンの押し始め・離したとき(アクションの開始)
+	return input;
+}
+
+// 入力を、カメラから見た水平の移動の向きへ直す
+GameScene::MoveDir GameScene::moveDirection(const PlayerInput &input) const
+{
+	// カメラの前(水平)と右(水平)。カメラは注視点の(sin yaw, cos yaw)側にいる
+	const float fx = -std::sin(cameraYaw_), fz = -std::cos(cameraYaw_);
+	const float rx = std::cos(cameraYaw_), rz = -std::sin(cameraYaw_);
+	MoveDir dir;
+	dir.x = fx * input.forward + rx * input.right;
+	dir.z = fz * input.forward + rz * input.right;
+	dir.length = std::sqrt(dir.x * dir.x + dir.z * dir.z);
+	dir.magnitude = std::min(dir.length, 1.0f); // スティックを少しだけ倒したときは、ゆっくり進む(キーボードは常に1)
+	if(dir.length > 0.0f){
+		dir.x /= dir.length;
+		dir.z /= dir.length;
+	}
+	return dir;
+}
+
+// ボタンの押し始め・離したとき(アクションの開始)
+void GameScene::handleActions(float dt, const PlayerInput &input, const MoveDir &dir)
+{
 	const bool busy = isAction(motion_);
-	if(actionDown){
+	if(input.actionDown){
 		actionHeldTime_ += dt;
 	}
 	if(settings_.input.rollOnPress > 0.5f){
-		if(actionDown && !actionHeld_ && !busy){
-			startAction(MotionRoll, dx, dz); // 押した瞬間に転がり始める
+		if(input.actionDown && !actionHeld_ && !busy){
+			startAction(MotionRoll, dir.x, dir.z); // 押した瞬間に転がり始める
 		}
-		if(!actionDown){
+		if(!input.actionDown){
 			actionHeldTime_ = 0.0f;
 		}
 	}
-	else if(actionHeld_ && !actionDown){
+	else if(actionHeld_ && !input.actionDown){
 		if(actionHeldTime_ < settings_.input.tapTime && !busy){
-			startAction(MotionRoll, dx, dz); // 単押し(離したときに転がる)
+			startAction(MotionRoll, dir.x, dir.z); // 単押し(離したときに転がる)
 		}
 		actionHeldTime_ = 0.0f;
 	}
-	actionHeld_ = actionDown;
-	static const int kAttackMotions[4] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionRoundhouse};
-	for(int i = 0; i < 4; ++i){
-		if(attack[i] && !actionPrev_[i] && !isAction(motion_)){
+	actionHeld_ = input.actionDown;
+	static const int kAttackMotions[kAttackCount] = {MotionPunchRight, MotionKickHigh, MotionPunchLeft, MotionRoundhouse};
+	for(int i = 0; i < kAttackCount; ++i){
+		if(input.attack[i] && !actionPrev_[i] && !isAction(motion_)){
 			startAction(kAttackMotions[i], 0.0f, 0.0f);
 		}
-		actionPrev_[i] = attack[i];
+		actionPrev_[i] = input.attack[i];
 	}
 	if(pendingAuto_ >= 0){
 		if(!isAction(motion_)){
-			startAction(pendingAuto_, dx, dz);
+			startAction(pendingAuto_, dir.x, dir.z);
 		}
 		pendingAuto_ = -1;
 	}
+}
 
-	// 動き: アクション中は、転がるときだけ前へ進む(坂の登り始め・終わりのモーションの間は、止まる)。それ以外は、入力の向きへ
+// 動き: アクション中は、転がるときだけ前へ進む(坂の登り始め・終わりのモーションの間は、止まる)。それ以外は、入力の向きへ
+void GameScene::updateLocomotion(float dt, const PlayerInput &input, const MoveDir &dir)
+{
+	const float dx = dir.x, dz = dir.z, length = dir.length;
 	walking_ = false;
 	int wanted = MotionIdle;
 	if(isAction(motion_)){
@@ -658,23 +689,21 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		if(motions_[MotionClimb] && length > 0.0f){
 			const float span = std::max(settings_.climb.blendHigh - settings_.climb.blendLow, 1e-3f);
 			const float t = std::clamp((slope - settings_.climb.blendLow) / span, 0.0f, 1.0f);
-			target = t * t * (3.0f - 2.0f * t);
+			target = smoothstep01(t);
 		}
 		const float rate = target > climbWeight_ ? settings_.climb.riseRate : settings_.climb.fallRate;
 		climbWeight_ += (target - climbWeight_) * std::min(1.0f, rate * dt);
 		if(length > 0.0f){
-			climbSlope_ += (slope - climbSlope_) * std::min(1.0f, 8.0f * dt);
-		}
-		if(length > 0.0f){
+			climbSlope_ += (slope - climbSlope_) * std::min(1.0f, kClimbSlopeSmoothRate * dt);
 			walking_ = true;
-			const bool fast = run && actionDown && actionHeldTime_ >= settings_.input.tapTime;
-			if(run){
+			const bool fast = input.run && input.actionDown && actionHeldTime_ >= settings_.input.tapTime;
+			if(input.run){
 				wanted = fast ? MotionFastRun : MotionSlowRun;
 				speed = fast ? settings_.player.fastRunSpeed : settings_.player.slowRunSpeed;
 			}
 			else{
 				wanted = MotionWalk;
-				speed = settings_.player.walkSpeed * magnitude;
+				speed = settings_.player.walkSpeed * dir.magnitude;
 			}
 			if(!motions_[wanted]){ // 走りのモーションが読めなかったときは、歩きで
 				wanted = MotionWalk;
@@ -696,18 +725,20 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		motion_ = wanted;
 	}
 	else{
-		climbWeight_ += (0.0f - climbWeight_) * std::min(1.0f, 8.0f * dt); // アクション中は、登りの混ざりを戻す
+		climbWeight_ += (0.0f - climbWeight_) * std::min(1.0f, kClimbSlopeSmoothRate * dt); // アクション中は、登りの混ざりを戻す
 	}
-	// 坂を登っている(登りが混ざっている)とき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
-	{
-		const float tiltTarget = std::atan(climbSlope_) * settings_.climb.tiltFactor * climbWeight_;
-		tilt_ += (tiltTarget - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
-	}
-	playerY_ = map_.heightAt(playerX_, playerZ_);
-	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
-	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)) * geo::Quaternionf::createRotater(-tilt_, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+}
 
-	// モーション
+// 坂を登っている(登りが混ざっている)とき、キャラを坂に沿って(坂の角度の tiltFactor の割合だけ)後ろへ傾ける。なめらかに追いつく
+void GameScene::updateTilt(float dt)
+{
+	const float tiltTarget = std::atan(climbSlope_) * settings_.climb.tiltFactor * climbWeight_;
+	tilt_ += (tiltTarget - tilt_) * std::min(1.0f, settings_.climb.tiltSmooth * dt);
+}
+
+// モーションを当てる: ループ、登りの混ぜ、クロスフェード
+void GameScene::applyMotion(float dt)
+{
 	auto *skeleton = player_->skeleton();
 	if(!skeleton){
 		return;
@@ -731,12 +762,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 		climbTime_ = std::fmod(climbTime_ + dt, loopLength(MotionClimb) + 1e-3f);
 		capturePose(*skeleton, basePose_);
 		applyLooped(MotionClimb, climbTime_, *skeleton, morphs);
-		for(size_t i = 0; i < skeleton->boneCount() && i < basePose_.rotations.size(); ++i){
-			const int bone = static_cast<int>(i);
-			const model::Vec3 &from = basePose_.translations[i], &to = skeleton->boneTranslation(bone);
-			skeleton->setBoneRotation(bone, model::Quat::slerp(basePose_.rotations[i], skeleton->boneRotation(bone), climbWeight_));
-			skeleton->setBoneTranslation(bone, {from.x + (to.x - from.x) * climbWeight_, from.y + (to.y - from.y) * climbWeight_, from.z + (to.z - from.z) * climbWeight_});
-		}
+		blendPose(*skeleton, basePose_, climbWeight_);
 	}
 	// クロスフェード: モーションが切り替わった瞬間に、直前の姿勢を覚えて、新しい姿勢へ混ぜていく
 	if(appliedMotion_ >= 0 && appliedMotion_ != motion_ && !lastPose_.rotations.empty()){
@@ -748,42 +774,54 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	if(fadeTime_ < fadeDuration_ && fadeFrom_.rotations.size() == skeleton->boneCount()){
 		fadeTime_ += dt;
 		const float t = std::clamp(fadeTime_ / fadeDuration_, 0.0f, 1.0f);
-		const float alpha = t * t * (3.0f - 2.0f * t); // なめらかに始まり、なめらかに終わる
-		for(size_t i = 0; i < skeleton->boneCount(); ++i){
-			const int bone = static_cast<int>(i);
-			const model::Quat &toRotation = skeleton->boneRotation(bone);
-			const model::Vec3 &toTranslation = skeleton->boneTranslation(bone);
-			const model::Vec3 &fromTranslation = fadeFrom_.translations[i];
-			skeleton->setBoneRotation(bone, model::Quat::slerp(fadeFrom_.rotations[i], toRotation, alpha));
-			skeleton->setBoneTranslation(bone, {fromTranslation.x + (toTranslation.x - fromTranslation.x) * alpha,
-				fromTranslation.y + (toTranslation.y - fromTranslation.y) * alpha, fromTranslation.z + (toTranslation.z - fromTranslation.z) * alpha});
-		}
+		const float alpha = smoothstep01(t);
+		blendPose(*skeleton, fadeFrom_, alpha);
 	}
 	capturePose(*skeleton, lastPose_);
 	player_->updatePose(dt);
 }
 
+// 入力に合わせてプレイヤーを動かし、モーションを当てる:
+//   左スティックを倒しきらない: 歩き。最大(キーボードはShift): Slow Run。Aボタン(キーボードはSpace)を押しっぱなしで最大: Fast Run
+//   歩いて登れない少し急な坂(maxSlope〜maxClimbSlope)へ進む: Climbing Slope(ゆっくり登る)
+//   Aボタンの単押し: Stand To Roll。R1: Punching Right、R2: Mma Kick Right High、L1: Punching Left、L2: Roundhouse Kick(キーボードは X V Z C)
+//   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
+void GameScene::updatePlayer(float dt, uint32_t tick)
+{
+	const PlayerInput input = gatherInput(dt, tick);
+	const MoveDir dir = moveDirection(input);
+	handleActions(dt, input, dir);
+	updateLocomotion(dt, input, dir);
+	updateTilt(dt);
+	playerY_ = map_.heightAt(playerX_, playerZ_);
+	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
+	playerTransform_.setRotation(geo::Quaternionf::createRotater(heading_, geo::Vector3f(0.0f, 1.0f, 0.0f)) * geo::Quaternionf::createRotater(-tilt_, geo::Vector3f(1.0f, 0.0f, 0.0f)));
+	applyMotion(dt);
+}
+
 void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
 {
 	auto &window = vulkanWindow(*this);
-	fieldRenderer_->draw(window, viewProj);
+	fieldRenderer_->draw(viewProj);
 	propRenderer_->draw(map_, viewProj);
 	// プレイヤーと、足元の丸い影
 	window.draw(player_, viewProj, playerTransform_.getMatrix());
 	blob_->draw(window, viewProj, playerX_, playerY_, playerZ_, 0.5f, 0.55f);
 }
 
+// F5の読み直し: データ定義(文字列・フォントなど)、HUDのスクリプト、調整値・地形の設定。
+// 調整値の読み直しで cameraDistance_ も初期値へ戻る(仕様)
+void GameScene::reloadAll()
+{
+	SDL_Log("hud: reloading %s", kHudScript);
+	getResources().reload();
+	hud_->load(kHudScript);
+	reloadSettings();
+}
+
 // HUDへ、ゲームの状態を渡して、スクリプトのupdateを進める(描画はdrawHudで)
 void GameScene::updateHud(float dt, uint32_t tick)
 {
-	(void)tick;
-	if(reloadHud_){
-		reloadHud_ = false;
-		SDL_Log("hud: reloading %s", kHudScript);
-		getResources().reload();
-		hud_->load(kHudScript);
-		reloadSettings();
-	}
 	if(dt > 0.0f){
 		const float instant = 1.0f / dt;
 		fps_ = fps_ <= 0.0f ? instant : fps_ + (instant - fps_) * 0.1f; // 少しならして、数字がちらつかないように
@@ -843,15 +881,15 @@ void GameScene::computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookA
 		const float u = std::clamp((groundPitch - cameraPitch_) / (groundPitch - kMinPitch), 0.0f, 1.0f);
 		const float approach = std::clamp(u / settings_.camera.approachFraction, 0.0f, 1.0f); // 寄る進み具合
 		const float rise = std::clamp((u - settings_.camera.approachFraction) / (1.0f - settings_.camera.approachFraction), 0.0f, 1.0f); // 上がる進み具合
-		const float theta = rise * 1.5707963f;
+		const float theta = rise * kHalfPi;
 		const float startDistance = std::cos(groundPitch) * cameraDistance_;
 		const float bodyDistance = std::min(settings_.camera.bodyDistance * modelHeight_ / settings_.camera.referenceHeight, startDistance);
-		const float easedApproach = approach * approach * (3.0f - 2.0f * approach);
+		const float easedApproach = smoothstep01(approach);
 		const float horizontal = (startDistance + (bodyDistance - startDistance) * easedApproach) * std::cos(theta);
 		const float height = playerY_ + minEyeHeight_ + (headTop_ - minEyeHeight_) * std::sin(theta);
 		eye = geo::Vector3f(playerX_ + sinYaw * horizontal, height, playerZ_ + cosYaw * horizontal);
 		const float look = rise * rise; // 見る先が頭から離れるのは、上がる後半の終盤から(それまでは、体が視界に残る)
-		lookAt = head + (eye + geo::Vector3f(0.0f, 4.0f, 0.0f) - head) * look;
+		lookAt = head + (eye + geo::Vector3f(0.0f, kLookUpOffset, 0.0f) - head) * look;
 	}
 	// 地形: 頭からカメラへの線が地面(丘・坂)に当たるなら、当たる手前まで引き寄せる。縮むときはすぐ、戻るときはなめらかに(カメラが震えないよう)。
 	// 引き寄せたあとも、カメラの下の地面から minEyeHeight_ 以上は高くする
@@ -896,30 +934,16 @@ bool GameScene::onIdle(uint32_t tick)
 	auto &window = vulkanWindow(*this);
 	const float dt = std::min(static_cast<float>(tick - lastTick_) * 0.001f, 0.1f);
 	lastTick_ = tick;
-	// 動作確認用: VULKAN_AUTOPAUSE=ミリ秒 で、その時間後にポーズを開く。VULKAN_AUTOMOUSE="x,y@ミリ秒[,click]" は、LuaUiSceneと同じ(ポーズ中のメニューへ)
-	static const char *autoPause = SDL_getenv("VULKAN_AUTOPAUSE");
-	if(autoPause && !paused_ && !autoPauseDone_ && tick >= static_cast<uint32_t>(std::atoi(autoPause)) + startTick_){
-		autoPauseDone_ = true;
+	// 動作確認用の環境変数(DebugAutomation参照): ポーズ(AUTOPAUSE)・読み直し(AUTORELOAD)・ポーズ中のメニューへのマウス(AUTOMOUSE)
+	const int elapsedMs = static_cast<int>(tick - startTick_);
+	if(!paused_ && automation_.takePause(elapsedMs)){
 		setPaused(true);
 	}
-	// 動作確認用: VULKAN_AUTORELOAD=ミリ秒 で、その時間後に、F5と同じ読み直しをする
-	static const char *autoReload = SDL_getenv("VULKAN_AUTORELOAD");
-	if(autoReload && !autoReloadDone_ && tick >= static_cast<uint32_t>(std::atoi(autoReload)) + startTick_){
-		autoReloadDone_ = true;
+	if(automation_.takeReload(elapsedMs)){
 		reloadHud_ = true;
 	}
-	static const char *autoMouse = SDL_getenv("VULKAN_AUTOMOUSE");
-	if(autoMouse && paused_ && !autoMouseDone_){
-		float mx = 0.0f, my = 0.0f;
-		int at = 0;
-		if(std::sscanf(autoMouse, "%f,%f@%d", &mx, &my, &at) == 3 && tick >= startTick_ + static_cast<uint32_t>(at)){
-			autoMouseDone_ = true;
-			pauseMenu_->onMouseMove(mx, my);
-			if(std::strstr(autoMouse, ",click")){
-				pauseMenu_->onMouseButton(1, true, mx, my);
-				pauseMenu_->onMouseButton(1, false, mx, my);
-			}
-		}
+	if(DebugAutomation::Mouse mouse; paused_ && automation_.takeMouse(elapsedMs, mouse)){
+		DebugAutomation::sendMouse(*pauseMenu_, mouse);
 	}
 	if(!paused_){
 		updatePlayer(dt, tick);
@@ -933,6 +957,10 @@ bool GameScene::onIdle(uint32_t tick)
 	window.setCameraPosition(eye);
 
 	drawScene(proj * view);
+	if(reloadHud_){
+		reloadHud_ = false;
+		reloadAll();
+	}
 	updateHud(paused_ ? 0.0f : dt, tick);
 	hud_->draw();
 	if(paused_){

@@ -3,9 +3,7 @@
 
 #include "misc/Uncopyable.h"
 #include <memory>
-#include <functional>
 
-class Scene;
 class SceneHost;
 namespace SDL_
 {
@@ -31,13 +29,12 @@ public:
 	void unregisterTask(int, bool);
 
 	virtual void dispatch(const SDL_Event &) = 0;
-	virtual void onSuspend() = 0;
+	virtual void onSuspend() {}
 	virtual bool onIdle(uint32_t);
 	virtual void onCreate(uint32_t);
 	virtual void onDestroy(uint32_t);
 	virtual void onResume(uint32_t);
 
-	// void clear();
 	void swap();
 	void quit();
 

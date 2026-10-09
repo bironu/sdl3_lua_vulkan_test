@@ -9,16 +9,21 @@
 #include <SDL3/SDL_log.h>
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace game
 {
 
 namespace
 {
-constexpr float kPi = 3.14159265f;
+constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kRingRadiusX = 2.7f; // 円(を横に見た楕円)の、横と奥行きの半径(メートル)
 constexpr float kRingRadiusZ = 2.2f;
 constexpr float kRotateRate = 11.0f; // 回転が目標へ近づく速さ(1/秒。大きいほど速い)
+const geo::Vector3f kCameraEye(0.0f, 1.9f, 4.6f);
+const geo::Vector3f kCameraLookAt(0.0f, 0.95f, -0.6f);
+constexpr float kShadowRadius = 0.55f;
+constexpr float kShadowOpacity = 0.55f;
 }
 
 CharacterSelectScene::~CharacterSelectScene()
@@ -125,9 +130,16 @@ void CharacterSelectScene::workerLoop()
 		}
 		Slot &slot = *slots_[index];
 		// ファイルの読み込みと、埋め込み画像のデコード(重い部分)。GPUの資源は、メインスレッドで作る
-		const auto data = preload_->modelWithImages(slot.info.model);
-		preload_->animation(slot.info.motion);
-		slot.state = data ? kDataReady : kFailed;
+		// 例外が漏れるとstd::terminateになるので、ここで止めて失敗として扱う
+		try{
+			const auto data = preload_->modelWithImages(slot.info.model);
+			preload_->animation(slot.info.motion);
+			slot.state = data ? kDataReady : kFailed;
+		}
+		catch(const std::exception &e){
+			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to load %s: %s", slot.info.model.c_str(), e.what());
+			slot.state = kFailed;
+		}
 	}
 }
 
@@ -188,19 +200,16 @@ void CharacterSelectScene::onFrame(uint32_t tick)
 
 	// 読み終わったデータから、GPUの資源を1フレームに1体だけ作る(選択中のものを先に)
 	{
-		int order[16];
-		int n = 0;
-		order[n++] = current();
-		for(int i = 0; i < count && n < 16; ++i){
-			if(i != current()){
-				order[n++] = i;
+		const auto tryCreate = [this](int i){
+			Slot &slot = *slots_[i];
+			if(slot.state != kDataReady){
+				return false;
 			}
-		}
-		for(int i = 0; i < n; ++i){
-			Slot &slot = *slots_[order[i]];
-			if(slot.state == kDataReady){
-				createGpuResources(slot);
-				break;
+			createGpuResources(slot);
+			return true;
+		};
+		if(!tryCreate(current())){
+			for(int i = 0; i < count && !tryCreate(i); ++i){
 			}
 		}
 	}
@@ -209,12 +218,10 @@ void CharacterSelectScene::onFrame(uint32_t tick)
 	rotation_ += (static_cast<float>(target_) - rotation_) * (1.0f - std::exp(-kRotateRate * dt));
 
 	// カメラ: 少し上から、正面のキャラを見る
-	const geo::Vector3f eye(0.0f, 1.9f, 4.6f);
-	const geo::Vector3f lookAt(0.0f, 0.95f, -0.6f);
-	const auto view = geo::createLookAt<float>(eye, lookAt, {0.0f, 1.0f, 0.0f});
+	const auto view = geo::createLookAt<float>(kCameraEye, kCameraLookAt, {0.0f, 1.0f, 0.0f});
 	const auto proj = vk_::createPerspective(kPi / 4.5f, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 50.0f);
 	const auto viewProj = proj * view;
-	window.setCameraPosition(eye);
+	window.setCameraPosition(kCameraEye);
 
 	// 奥のものから描く(足元の影は半透明なので、モデルより先に、全員分を奥から)
 	struct Placed
@@ -230,7 +237,7 @@ void CharacterSelectScene::onFrame(uint32_t tick)
 	std::sort(placed.begin(), placed.end(), [](const Placed &a, const Placed &b){ return a.z < b.z; });
 	for(const auto &p : placed){
 		Slot &slot = *slots_[p.index];
-		blob_->draw(window, viewProj, p.x, 0.0f, p.z, 0.55f, 0.55f);
+		blob_->draw(window, viewProj, p.x, 0.0f, p.z, kShadowRadius, kShadowOpacity);
 		if(slot.state != kReady || !slot.model){
 			continue;
 		}

@@ -5,7 +5,6 @@
 #include "resources/ResourceSet.h"
 #include "resources/Resources.h"
 #include "task/TaskManager.h"
-#include <SDL3/SDL_log.h>
 
 Scene::Scene()
 	: app_(nullptr)
@@ -39,9 +38,9 @@ void Scene::swap()
 
 bool Scene::onIdle(uint32_t tick)
 {
+	// TaskManager::compute() は全タスク終了時に true を返す。
+	// onIdle は、まだタスクが残っていたら true(再描画を続ける)を返す
 	const bool stillRunning = !manager_->compute(tick);
-	/* レンダラはSDL_SetRenderVSync()でVSync有効にして生成されているため、
-	   ここで毎回present()してもリフレッシュレートで自然にペーシングされる */
 	return stillRunning;
 }
 

@@ -2,6 +2,7 @@
 #define COMMON_LUAUISCENE_H_
 
 #include "scene/Scene.h"
+#include "scene/common/DebugAutomation.h"
 #include "ui/PadNavigator.h"
 #include "ui/UiContext.h"
 #include "ui/UiScript.h"
@@ -21,7 +22,6 @@ public:
 	~LuaUiScene() override;
 
 	void dispatch(const SDL_Event &) override;
-	void onSuspend() override {}
 	void onCreate(uint32_t tick) override;
 	bool onIdle(uint32_t tick) override;
 
@@ -35,17 +35,12 @@ protected:
 	void changeScene(const std::string &name);
 
 private:
-	ui::PadNavigator padNavigator_; // ゲームパッドの十字キー・左スティックを、上下左右のキーとして渡す
-	// ウィンドウの座標を、論理画面の座標へ
-	void toScreen(float windowX, float windowY, float &x, float &y);
-
 	std::string scriptPath_;
 	std::unique_ptr<ui::UiContext> ctx_;
 	std::unique_ptr<ui::UiScript> script_;
+	ui::PadNavigator padNavigator_; // ゲームパッドの十字キー・左スティックを、上下左右のキーとして渡す
 	bool reloadRequested_ = false;
-	size_t autoKeyDone_ = 0; // VULKAN_AUTOKEYの、実行済みの数
-	bool autoReloadDone_ = false;
-	bool autoMouseDone_ = false;
+	DebugAutomation automation_; // 動作確認用の環境変数(onCreateで読む)
 	uint32_t startTick_ = 0;
 	uint32_t lastTick_ = 0;
 };
