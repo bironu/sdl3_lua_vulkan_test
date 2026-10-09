@@ -3,7 +3,7 @@
 
 local margin = 24
 local mapSize = 280
-local helpKeys = {"HudHelpTitle", "HudHelpMove", "HudHelpRun", "HudHelpRoll", "HudHelpAttack", "HudHelpCamera", "HudHelpZoom", "HudHelpMap", "HudHelpQuit"}
+local helpKeys = {"HudHelpTitle", "HudHelpMove", "HudHelpRun", "HudHelpRoll", "HudHelpAttack", "HudHelpCamera", "HudHelpMap", "HudHelpQuit"}
 local textSize = 28
 local lineHeight = 36
 

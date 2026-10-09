@@ -28,7 +28,7 @@ namespace game
 // ゲーム本体(最初の段階): 地面のタイルのフィールド(res/lua/data/field_settings.lua で指定したファイル。フィールドエディタで作る)を、プレイヤー(キャラクタ選択画面で選んだキャラ。GameSession)が歩く。
 //   W/A/S/D: カメラから見た前/左/後ろ/右へ移動(キャラは進む向きを向く)。壁に当たると、それ以上進めない
 //   ゲームパッド: 左スティックで移動(傾きの分だけ進む)、右スティックで視点の回転
-//   マウス: 視点の回転(三人称視点。マウスはウィンドウに取り込む)、ホイール: カメラの距離。Esc/Start: ポーズ(res/lua/ui/pause.lua。再開・言語・感度・タイトルへ・終了)
+//   マウス: 視点の回転(三人称視点。マウスはウィンドウに取り込む)。Esc/Start: ポーズ(res/lua/ui/pause.lua。再開・言語・感度・タイトルへ・終了)
 //   HUD(res/lua/ui/hud.lua。FPS・操作説明・ミニマップ): Luaのウィジェットで作る。H: 操作説明、M: ミニマップの表示切替、F5: スクリプト・調整値(res/lua/data/game_settings.lua)の読み直し
 class GameScene : public Scene
 {
@@ -166,8 +166,6 @@ private:
 	float cameraHeight_ = 1.35f;
 	float minEyeHeight_ = 0.3f;
 	float headTop_ = 1.9f;
-	float minCameraDistance_ = 1.2f;
-	float maxCameraDistance_ = 8.0f;
 
 	// 地面
 	std::vector<field::TileDef> tiles_;

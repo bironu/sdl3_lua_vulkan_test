@@ -66,8 +66,6 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(camera, "minEyeHeight", result.camera.minEyeHeight);
 	readFloat(camera, "headTop", result.camera.headTop);
 	readFloat(camera, "distance", result.camera.distance);
-	readFloat(camera, "minDistance", result.camera.minDistance);
-	readFloat(camera, "maxDistance", result.camera.maxDistance);
 	readFloat(camera, "yawSpeed", result.camera.yawSpeed);
 	readFloat(camera, "pitchSpeed", result.camera.pitchSpeed);
 	readFloat(camera, "minArm", result.camera.minArm);
@@ -79,6 +77,32 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(fade, "fromActionMoving", result.fade.fromActionMoving);
 	readFloat(fade, "locomotion", result.fade.locomotion);
 	return result;
+}
+
+std::vector<std::string> loadMotionPaths(const std::string &manifestPath, const std::vector<std::string> &names)
+{
+	std::vector<std::string> paths(names.size());
+	sol::state lua;
+	lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
+	const auto loaded = lua.safe_script_file(ResourcePaths::resource(manifestPath.c_str()), sol::script_pass_on_error);
+	if(!loaded.valid()){
+		const sol::error error = loaded;
+		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "motion table error (%s): %s", manifestPath.c_str(), error.what());
+		return paths;
+	}
+	const sol::optional<sol::table> motions = lua["motions"];
+	if(!motions){
+		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "motion table: no 'motions' table in %s", manifestPath.c_str());
+		return paths;
+	}
+	for(size_t i = 0; i < names.size(); ++i){
+		const sol::optional<std::string> path = (*motions)[names[i]];
+		paths[i] = path.value_or(std::string());
+		if(paths[i].empty()){
+			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "motion table: no motion '%s' in %s", names[i].c_str(), manifestPath.c_str());
+		}
+	}
+	return paths;
 }
 
 } // namespace game
