@@ -1,3 +1,4 @@
+#include "app/Application.h"
 #include "scene/game/GameScene.h"
 #include "geo/Calculator.h"
 #include "resources/ResourcePaths.h"
@@ -491,7 +492,7 @@ void GameScene::startAction(int motion, float dirX, float dirZ)
 //   アクションは、終わるまで他の操作を受けない(転がるときだけ、前へ進む)
 void GameScene::updatePlayer(float dt, uint32_t tick)
 {
-	const bool *keys = SDL_GetKeyboardState(nullptr);
+	const bool *keys = Application::getKeybordState();
 	float right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
 	float forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
 	bool run = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
