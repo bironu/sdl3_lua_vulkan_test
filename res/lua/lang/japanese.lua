@@ -19,7 +19,6 @@ strings = {
 	HudHelpRoll = "Aボタン / Space: 転がる(長押し+倒しきる: 全力で走る)",
 	HudHelpAttack = "R1 R2 L1 L2 / X V Z C: 攻撃",
 	HudHelpCamera = "マウス / 右スティック: 視点",
-	HudHelpZoom = "ホイール: カメラの距離",
 	HudHelpMap = "M: ミニマップ切替",
 	HudHelpQuit = "Esc / Start: ポーズ",
 	PauseTitle = "ポーズ",

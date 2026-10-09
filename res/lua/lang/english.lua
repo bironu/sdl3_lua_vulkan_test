@@ -17,7 +17,6 @@ strings = {
 	HudHelpRoll = "A / Space: Roll (hold + full tilt: Sprint)",
 	HudHelpAttack = "R1 R2 L1 L2 / X V Z C: Attack",
 	HudHelpCamera = "Mouse / Right stick: Look",
-	HudHelpZoom = "Wheel: Camera distance",
 	HudHelpMap = "M: Toggle minimap",
 	HudHelpQuit = "Esc / Start: Pause",
 	PauseTitle = "Paused",

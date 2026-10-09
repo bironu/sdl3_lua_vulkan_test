@@ -41,11 +41,6 @@ void FieldRenderer::invalidate(int x0, int z0, int x1, int z1)
 	}
 }
 
-void FieldRenderer::invalidateAll()
-{
-	std::fill(dirty_.begin(), dirty_.end(), true);
-}
-
 void FieldRenderer::update(const field::FieldMap &map)
 {
 	for(int cz = 0; cz < chunksZ_; ++cz){

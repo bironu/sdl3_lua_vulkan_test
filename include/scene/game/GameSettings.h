@@ -2,6 +2,7 @@
 #define GAME_GAMESETTINGS_H_
 
 #include <string>
+#include <vector>
 
 namespace game
 {
@@ -55,9 +56,7 @@ struct GameSettings
 		float height = 1.35f;         // 注視点(プレイヤーの頭のあたり)の高さ
 		float minEyeHeight = 0.3f;    // カメラの、地面からの最低の高さ。これより下へ行きそうなら、体の近くへ寄って、体に沿って頭の上へ回る
 		float headTop = 1.9f;         // 体に沿って上がったカメラが、最後に着く高さ(頭のてっぺんの上)
-		float distance = 3.5f;        // カメラの距離の初期値
-		float minDistance = 1.2f;     // ホイールで寄れる最短の距離
-		float maxDistance = 8.0f;     // 同、最長
+		float distance = 3.5f;        // カメラの距離
 		float yawSpeed = 2.6f;        // 右スティックを倒しきったときの、水平の回転の速さ(ラジアン/秒)
 		float pitchSpeed = 1.6f;      // 同、上下
 		float minArm = 0.5f;          // 地形に遮られたときの、頭からカメラまでの最短の距離
@@ -76,6 +75,9 @@ struct GameSettings
 
 // 設定を読む(パスはリポジトリ直下からの相対。ファイルが無い・読めない項目は、既定のまま。失敗はログに出す)
 GameSettings loadGameSettings(const std::string &relativePath = "res/lua/data/game_settings.lua");
+
+// キャラのモーションの表(manifestの motions = { 名前 = "パス" })から、names の順にパスを返す(表に無い名前は、空文字)。失敗はログに出す
+std::vector<std::string> loadMotionPaths(const std::string &manifestPath, const std::vector<std::string> &names);
 
 } // namespace game
 

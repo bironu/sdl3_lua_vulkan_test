@@ -19,6 +19,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_log.h>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -55,18 +56,9 @@ float smoothstep01(float t)
 	return t * t * (3.0f - 2.0f * t);
 }
 
-// モーションのパス(game.assets.lua と同じパス)
-constexpr const char *kMotionPaths[] = {
-	"res/motion/Standing Idle.vrma",   // 立ち
-	"res/motion/Walking.vrma",         // 歩き(左スティックを倒しきらない)
-	"res/motion/Slow Run.vrma",        // 左スティックを最大に倒す
-	"res/motion/Fast Run.vrma",        // Aボタンを押しっぱなし + 左スティックを最大に倒す
-	"res/motion/Climbing Slope.vrma",  // 歩いて登れない少し急な坂へ進む(ゆっくり登る)
-	"res/motion/Stand To Roll.vrma",   // Aボタン単押し
-	"res/motion/Punching Right.vrma",  // R1
-	"res/motion/Punching Left.vrma",   // L1
-	"res/motion/Mma Kick Right High.vrma", // R2
-	"res/motion/Roundhouse Kick.vrma",    // L2
+// モーションの名前(res/lua/game.assets.lua の motions の表のキー。GameScene::Motion の並びと同じ)
+const std::vector<std::string> kMotionNames = {
+	"idle", "walk", "slowRun", "fastRun", "climb", "roll", "punchRight", "punchLeft", "kickHigh", "roundhouse",
 };
 }
 
@@ -176,11 +168,6 @@ void GameScene::dispatch(const SDL_Event &event)
 			pauseMenu_->onMouseButton(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, x, y);
 		}
 		break;
-	case SDL_EVENT_MOUSE_WHEEL:
-		if(!paused_){
-			cameraDistance_ = std::clamp(cameraDistance_ * std::exp(-event.wheel.y * 0.1f), minCameraDistance_, maxCameraDistance_);
-		}
-		break;
 	default:
 		break;
 	}
@@ -259,8 +246,13 @@ bool GameScene::loadPlayer(SDL_::VulkanWindow &window)
 void GameScene::loadMotions()
 {
 	if(player_->skeleton()){
+		assert(kMotionNames.size() == MotionCount); // 列挙と名前の並びが食い違っていないか
+		const auto paths = loadMotionPaths(kAssetManifest, kMotionNames);
 		for(int i = 0; i < MotionCount; ++i){
-			if(const auto animation = resources().animation(kMotionPaths[i])){
+			if(paths[i].empty()){
+				continue;
+			}
+			if(const auto animation = resources().animation(paths[i])){
 				if(i == MotionRoll){
 					rollAnimation_ = animation;
 					buildRollProfile();
@@ -810,7 +802,7 @@ void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
 }
 
 // F5の読み直し: データ定義(文字列・フォントなど)、HUDのスクリプト、調整値・地形の設定。
-// 調整値の読み直しで cameraDistance_ も初期値へ戻る(仕様)
+// カメラの距離は調整値(game_settings.lua の camera.distance)で決まるので、読み直すと、その値になる
 void GameScene::reloadAll()
 {
 	SDL_Log("hud: reloading %s", kHudScript);
@@ -858,8 +850,6 @@ void GameScene::applyModelHeight(float height)
 	cameraHeight_ = settings_.camera.height * scale;
 	minEyeHeight_ = settings_.camera.minEyeHeight * scale;
 	headTop_ = settings_.camera.headTop * scale;
-	minCameraDistance_ = settings_.camera.minDistance * scale;
-	maxCameraDistance_ = settings_.camera.maxDistance * scale;
 	cameraDistance_ = settings_.camera.distance * scale;
 	SDL_Log("Player height %.2f m (camera height %.2f, distance %.2f)", modelHeight_, cameraHeight_, cameraDistance_);
 }

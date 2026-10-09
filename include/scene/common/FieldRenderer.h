@@ -28,8 +28,6 @@ public:
 
 	// マス(x0,z0)〜(x1,z1)(両端を含む)が変わった。法線が隣へ及ぶ分は、中で足す
 	void invalidate(int x0, int z0, int x1, int z1);
-	// 全部作り直す(サイズが違うフィールドを読んだとき。作り直したマップを渡す)
-	void invalidateAll();
 	// 変わったチャンクのメッシュを作り直す
 	void update(const field::FieldMap &map);
 
