@@ -1,7 +1,10 @@
 #include "scene/game/EnemyHorde.h"
 #include "field/FieldMap.h"
 #include "field/FieldMovement.h"
+#include "field/PropCollision.h"
+#include "model/AnimationClip.h"
 #include "resources/LuaTable.h"
+#include "resources/ResourcePaths.h"
 #include "resources/ResourceSet.h"
 #include "scene/common/BlobShadow.h"
 #include "scene/common/ModelFactory.h"
@@ -42,6 +45,23 @@ float approachAngle(float a, float target, float maxStep)
 	}
 	diff -= kPi;
 	return a + std::clamp(diff, -maxStep, maxStep);
+}
+
+// 攻撃B の動きの時刻 time を、実時間 dt だけ進めた時刻。空中の区間(airStart〜airEnd)は airRate(動きの秒 ÷ 実時間の秒)、ほかは rate で進む
+float advanceJumpTime(float time, float dt, float rate, float airStart, float airEnd, float airRate)
+{
+	while(dt > 0.0f){
+		const bool inAir = time >= airStart && time < airEnd;
+		const float speed = std::max(inAir ? airRate : rate, 1e-3f);
+		const float next = time < airStart ? airStart : (inAir ? airEnd : std::numeric_limits<float>::max());
+		const float need = (next - time) / speed; // 次の区間の境までの実時間
+		if(need >= dt){
+			return time + dt * speed;
+		}
+		time = next;
+		dt -= need;
+	}
+	return time;
 }
 
 model::Quat rotationX(float radians) { return model::Quat::fromAxisAngle({1.0f, 0.0f, 0.0f}, radians); }
@@ -221,6 +241,12 @@ void readCreatureMotion(const sol::table &t, EnemyType &type)
 	readFloat(jump, "landGapJitter", j.landGapJitter);
 	readFloat(jump, "landAngleJitter", j.landAngleJitter);
 	readInt(jump, "landTries", j.landTries);
+	readFloat(jump, "minDistance", j.minDistance);
+	readFloat(jump, "minHeight", j.minHeight);
+	readFloat(jump, "maxHeight", j.maxHeight);
+	readFloat(jump, "gravity", j.gravity);
+	readFloat(jump, "clearance", j.clearance);
+	readFloat(jump, "probeStep", j.probeStep);
 	readSquash(jump, j.squash);
 	readFloat(death, "duration", motion.death.duration);
 	readFloat(death, "roll", motion.death.roll);
@@ -236,6 +262,49 @@ void readCreatureMotion(const sol::table &t, EnemyType &type)
 	readFloat(behavior, "cooldownJitter", b.cooldownJitter);
 	readFloat(behavior, "retry", b.retry);
 	readFloat(behavior, "timeJitter", b.timeJitter);
+}
+
+void readClipEntry(const sol::optional<sol::table> &motions, const char *key, CreatureClipMotion::Entry &entry)
+{
+	if(!motions){
+		return;
+	}
+	const sol::optional<sol::table> t = (*motions)[key];
+	readString(t, "clip", entry.clip);
+	readFloat(t, "stride", entry.stride);
+	if(t){
+		entry.loop = t->get_or("loop", entry.loop);
+	}
+}
+
+// クリップで動かすときの表(enemies.lua の clips・motions・rootMotionBones)
+void readClipMotion(const sol::table &t, CreatureClipMotion &clips)
+{
+	clips.path = t.get_or("clips", clips.path);
+	const sol::optional<sol::table> motions = t["motions"];
+	readClipEntry(motions, "idle", clips.idle);
+	readClipEntry(motions, "walkFast", clips.walkFast);
+	readClipEntry(motions, "walkSlow", clips.walkSlow);
+	readClipEntry(motions, "attackStand", clips.attackStand);
+	readClipEntry(motions, "attackJump", clips.attackJump);
+	readClipEntry(motions, "death", clips.death);
+	sol::optional<sol::table> stand, jump;
+	if(motions){
+		stand = (*motions)["attackStand"].get<sol::optional<sol::table>>();
+		jump = (*motions)["attackJump"].get<sol::optional<sol::table>>();
+	}
+	readFloat(stand, "fallStart", clips.stand.fallStart);
+	readFloat(stand, "fallEnd", clips.stand.fallEnd);
+	readFloat(stand, "recoverStart", clips.stand.recoverStart);
+	readFloat(stand, "recoverEnd", clips.stand.recoverEnd);
+	readFloat(jump, "crouchEnd", clips.jump.crouchEnd);
+	readFloat(jump, "launchEnd", clips.jump.launchEnd);
+	readFloat(jump, "airEnd", clips.jump.airEnd);
+	if(const sol::optional<sol::table> bones = t["rootMotionBones"]){
+		for(size_t i = 1; i <= bones->size(); ++i){
+			clips.rootMotionBones.push_back(bones->get_or(static_cast<int>(i), std::string()));
+		}
+	}
 }
 
 int findBone(const model::Skeleton &skeleton, const std::string &name, const std::string &kindName)
@@ -299,6 +368,7 @@ std::vector<EnemyType> loadEnemyTypes(const std::string &relativePath)
 		readFloat(lod, "interval", type.lod.interval);
 		if(type.creature){
 			readCreatureMotion(t, type);
+			readClipMotion(t, type.clipMotion);
 			result.push_back(std::move(type));
 			continue;
 		}
@@ -380,12 +450,27 @@ bool EnemyHorde::setupKind(Kind &kind, VulkanModel &model)
 	}
 	kind.boundY = 0.5f * top * kind.scale;
 	kind.boundRadius = std::max(1.2f * std::sqrt(radius2) * kind.scale, kind.def.shadowRadius);
+	kind.bodyRadius = 0.5f * std::min(kind.boxWidth, kind.boxLength);
 	SDL_Log("enemy '%s': model height %.2f, length %.2f units -> scale %.4f (%.2f m tall, %.2f m long, %.2f m wide), %zu vertices, box %.2f x %.2f x %.2f m",
 		name.c_str(), top, modelLength, kind.scale, top * kind.scale, modelLength * kind.scale, 2.0f * side * kind.scale, vertices.size(),
 		kind.boxWidth, kind.boxLength, kind.boxHeight);
 	if(kind.def.creature){
-		kind.creature.emplace(*skeleton, vertices, kind.def.creatureMotion, 1.0f / kind.scale);
-		SDL_Log("enemy '%s': creature with %zu legs", name.c_str(), kind.creature->legCount());
+		// clips があれば、クリップの再生で動かす(読めなければ、数式で動かす)
+		const CreatureMotion &motion = kind.def.creatureMotion;
+		const CreatureClipMotion &clipMotion = kind.def.clipMotion;
+		if(!clipMotion.path.empty()){
+			auto clips = std::make_shared<const std::vector<model::AnimationClip>>(model::loadAnimationClips(ResourcePaths::resource(clipMotion.path.c_str())));
+			if(!clips->empty()){
+				kind.creature = std::make_unique<CreatureClipAnimator>(clips, *skeleton, clipMotion, motion.walkFast.speed, motion.walkSlow.speed, motion.blend,
+					1.0f / kind.scale);
+				SDL_Log("enemy '%s': creature moved by %zu clips (%s)", name.c_str(), clips->size(), clipMotion.path.c_str());
+			}
+		}
+		if(!kind.creature){
+			auto animator = std::make_unique<CreatureAnimator>(*skeleton, vertices, motion, 1.0f / kind.scale);
+			SDL_Log("enemy '%s': creature with %zu legs (procedural motion)", name.c_str(), animator->legCount());
+			kind.creature = std::move(animator);
+		}
 	}
 	else{
 		setupPmxBones(kind, *skeleton);
@@ -517,8 +602,8 @@ EnemyHorde::Collider EnemyHorde::colliderOf(const Enemy &enemy) const
 	collider.mobility = enemy.pinned ? kPinnedMobility : (enemy.moving ? kWalkMobility : kIdleMobility);
 	float fallen = 0.0f;
 	if(kind.creature){
-		using Motion = CreatureAnimator::Motion;
-		const CreatureAnimator::State &state = enemy.creature;
+		using Motion = CreatureDriver::Motion;
+		const CreatureDriver::State &state = enemy.creature;
 		const float jump = kind.creature->jumpProgress(state);
 		collider.solid = jump <= 0.0f || jump >= 1.0f;
 		fallen = kind.creature->fallen(state);
@@ -687,7 +772,8 @@ void EnemyHorde::chooseLanding(const Kind &kind, Enemy &enemy, float targetX, fl
 	}
 }
 
-void EnemyHorde::update(float dt, const field::FieldMap &map, const field::MovementRules &rules, float targetX, float targetZ)
+void EnemyHorde::update(float dt, const field::FieldMap &map, const field::MovementRules &rules, const field::PropCollision &props, float targetX,
+	float targetZ)
 {
 	if(enemies_.empty() || dt <= 0.0f){
 		return;
@@ -703,7 +789,7 @@ void EnemyHorde::update(float dt, const field::FieldMap &map, const field::Movem
 			enemy.moving = !enemy.moving;
 		}
 		// 丸い生き物の体が攻撃している間は、攻撃の動きだけ(歩き・押し合い・向きの変化は止める)
-		if(!kind.creature || !updateCreature(kind, enemy, dt, distance, dx, dz, map, rules)){
+		if(!kind.creature || !updateCreature(kind, enemy, dt, distance, dx, dz, map, rules, props)){
 			const auto &creatureMotion = def.creatureMotion;
 			const float baseSpeed = !kind.creature ? def.speed : (enemy.fast ? creatureMotion.walkFast.speed : creatureMotion.walkSlow.speed);
 			const float speed = baseSpeed * enemy.speedScale;
@@ -724,7 +810,7 @@ void EnemyHorde::update(float dt, const field::FieldMap &map, const field::Movem
 			}
 			if(kind.creature){
 				// 丸い生き物の体: 歩いている間は、早歩きか、ゆっくり歩き。止まったら待機
-				using Motion = CreatureAnimator::Motion;
+				using Motion = CreatureDriver::Motion;
 				kind.creature->play(enemy.creature, enemy.moving ? (enemy.fast ? Motion::WalkFast : Motion::WalkSlow) : Motion::Idle);
 				kind.creature->advance(enemy.creature, dt, speed);
 			}
@@ -747,14 +833,78 @@ void EnemyHorde::update(float dt, const field::FieldMap &map, const field::Movem
 	resolveOverlaps(map, rules);
 }
 
-// 丸い生き物の体の攻撃。攻撃している間は true(跳ぶ攻撃なら、跳び立つ点から着地点(chooseLanding)へ、位置を放物線で動かす)。
-// 攻撃していなければ、時期(cooldown)になったら、プレイヤーとの距離に応じて、確率で攻撃を始める。攻撃が終わったら false(呼び出し側が歩き・待機に戻す)
-bool EnemyHorde::updateCreature(const Kind &kind, Enemy &enemy, float dt, float distance, float dx, float dz, const field::FieldMap &map,
-	const field::MovementRules &rules)
+// 跳ぶ軌道を決める: 今の位置から、着地点(enemy.jumpToX/Z。chooseLanding)へ。着地点は、立てる所(歩けるタイルの上・急すぎない坂・置物の外)に限る。
+// 頂点の高さ(跳び立つ点と着地点の地面を結ぶ直線から)は、跳ぶ距離に比例させ(height × 距離 ÷ distance。minHeight 以上)、経路の上の地面と置物のてっぺん
+// (置物は clearance を空ける)を越える高さまで上げる。maxHeight を超えるか、着地点に立てなければ、距離を縮めて試し直す(minDistance より短くなったら、跳べない)。
+// 経路の途中は、歩けない所(水など)でも越えてよい。滞空時間は、頂点の高さと重力から(√(8 × 高さ ÷ 重力))。
+// 跳べれば true(跳び立つ点・着地点・高さ・空中の区間の時刻の進み方を enemy に入れる)。hopInPlace なら、跳べないときは、その場で minHeight だけ跳ねる(true)
+bool EnemyHorde::planJump(const Kind &kind, Enemy &enemy, const field::FieldMap &map, const field::MovementRules &rules, const field::PropCollision &props,
+	bool hopInPlace)
 {
-	using Motion = CreatureAnimator::Motion;
-	const CreatureAnimator &creature = *kind.creature;
-	CreatureAnimator::State &state = enemy.creature;
+	constexpr float kShorten[] = {1.0f, 0.8f, 0.6f, 0.4f}; // 距離を縮めて試す割合
+	const auto &j = kind.def.creatureMotion.jump;
+	const float fromX = enemy.x, fromZ = enemy.z, fromY = map.heightAt(fromX, fromZ);
+	const float dx = enemy.jumpToX - fromX, dz = enemy.jumpToZ - fromZ, full = std::hypot(dx, dz);
+	const float step = std::max(j.probeStep, 0.05f);
+	auto decide = [&](float toX, float toZ, float toY, float height){
+		enemy.jumpFromX = fromX;
+		enemy.jumpFromZ = fromZ;
+		enemy.jumpFromY = fromY;
+		enemy.jumpToX = toX;
+		enemy.jumpToZ = toZ;
+		enemy.jumpToY = toY;
+		enemy.jumpHeight = height;
+		const CreatureDriver::JumpPhases phases = kind.creature->jumpPhases();
+		const float air = std::sqrt(8.0f * height / std::max(j.gravity, 0.1f));
+		enemy.jumpAirRate = std::max(phases.airEnd - phases.launchEnd, 0.0f) / std::max(air, 1e-3f);
+	};
+	for(const float f : kShorten){
+		const float d = full * f;
+		if(d < std::max(j.minDistance, 0.0f)){
+			break;
+		}
+		const float toX = fromX + dx * f, toZ = fromZ + dz * f;
+		float normal[3];
+		map.normalAt(toX, toZ, normal);
+		const float slope = std::hypot(normal[0], normal[2]) / std::max(normal[1], 1e-3f);
+		if(!field::canStandAt(map, rules, toX, toZ, kRadius) || slope > rules.maxSlope || props.overlaps(toX, toZ, kind.bodyRadius)){
+			continue;
+		}
+		const float toY = map.heightAt(toX, toZ);
+		// 距離に比例した高さ(minHeight 以上)。高低差があっても、頂点が2点の間に来る(登りながら着地しない)よう、高低差の半分以上
+		float height = std::max({j.minHeight, j.height * d / std::max(j.distance, 0.1f), 0.5f * std::fabs(toY - fromY)});
+		const int samples = std::max(2, static_cast<int>(std::ceil(d / step)));
+		for(int i = 1; i < samples; ++i){
+			// 放物線は、直線からの高さが 4 × 頂点の高さ × p(1-p)。障害物が直線より above だけ高ければ、頂点の高さは above ÷ 4p(1-p) 以上
+			const float p = static_cast<float>(i) / static_cast<float>(samples);
+			const float x = fromX + (toX - fromX) * p, z = fromZ + (toZ - fromZ) * p;
+			const float line = fromY + (toY - fromY) * p;
+			const float above = std::max(map.heightAt(x, z), props.topAt(x, z, kind.bodyRadius) + j.clearance) - line;
+			if(above > 0.0f){
+				height = std::max(height, above / (4.0f * p * (1.0f - p)));
+			}
+		}
+		if(height <= j.maxHeight){
+			decide(toX, toZ, toY, height);
+			return true;
+		}
+	}
+	if(hopInPlace){
+		decide(fromX, fromZ, fromY, std::max(j.minHeight, 0.0f));
+		return true;
+	}
+	return false;
+}
+
+// 丸い生き物の体の攻撃。攻撃している間は true(跳ぶ攻撃なら、跳び立つ点から着地点(chooseLanding・planJump)へ、位置を放物線で動かす)。
+// 攻撃していなければ、時期(cooldown)になったら、プレイヤーとの距離に応じて、確率で攻撃を始める(跳ぶ攻撃は、跳べる経路が無ければ始めない)。
+// 攻撃が終わったら false(呼び出し側が歩き・待機に戻す)
+bool EnemyHorde::updateCreature(const Kind &kind, Enemy &enemy, float dt, float distance, float dx, float dz, const field::FieldMap &map,
+	const field::MovementRules &rules, const field::PropCollision &props)
+{
+	using Motion = CreatureDriver::Motion;
+	const CreatureDriver &creature = *kind.creature;
+	CreatureDriver::State &state = enemy.creature;
 	const EnemyType::Behavior &b = kind.def.behavior;
 	std::uniform_real_distribution<float> unit(0.0f, 1.0f);
 	if(state.motion == Motion::AttackStand || state.motion == Motion::AttackJump){
@@ -770,34 +920,52 @@ bool EnemyHorde::updateCreature(const Kind &kind, Enemy &enemy, float dt, float 
 		}
 		const float chance = unit(rng_);
 		const bool stand = distance <= b.closeRange && chance < b.standChance;
-		const bool jump = !stand && distance > b.jumpMin && distance <= b.jumpRange && chance < b.jumpChance;
+		bool jump = !stand && distance > b.jumpMin && distance <= b.jumpRange && chance < b.jumpChance;
+		if(jump){
+			chooseLanding(kind, enemy, enemy.x + dx, enemy.z + dz, map);
+			jump = planJump(kind, enemy, map, rules, props, false); // 経路が塞がれていれば、跳ばずに歩く
+		}
 		if(!stand && !jump){
 			enemy.cooldown = b.retry;
 			return false;
 		}
 		creature.play(state, stand ? Motion::AttackStand : Motion::AttackJump);
 		enemy.jumping = jump;
-		if(jump){
-			chooseLanding(kind, enemy, enemy.x + dx, enemy.z + dz, map);
-		}
+		enemy.jumpPlanned = false;
 	}
-	creature.advance(state, dt, 0.0f);
-	// 跳ぶ攻撃: 跳び立つまでは、跳び立つ点を今の位置に合わせ(溜めの間に、重なりの押し出しで動いた分)、着地までは放物線で動かす。
+	if(state.motion != Motion::AttackJump || !enemy.jumping){
+		creature.advance(state, dt, 0.0f);
+		return true;
+	}
+	// 跳ぶ攻撃: 動きの時刻を進める(空中の区間は、決めた滞空時間に合わせて伸縮する。advance は時刻に rate を掛けるので、その分を割って渡す)
+	const CreatureDriver::JumpPhases phases = creature.jumpPhases();
+	const float time = advanceJumpTime(state.actionTime, dt, state.rate, phases.launchEnd, phases.airEnd, enemy.jumpAirRate);
+	creature.advance(state, (time - state.actionTime) / std::max(state.rate, 1e-3f), 0.0f);
+	// 踏み切りの直前(溜めの終わり)に、今の位置(溜めの間に、重なりの押し出しで動いた分)から、軌道を決め直す。跳べなくなっていたら、その場で跳ねる
+	if(!enemy.jumpPlanned && state.actionTime >= phases.crouchEnd){
+		enemy.jumpPlanned = true;
+		planJump(kind, enemy, map, rules, props, true);
+	}
+	const float p = creature.jumpProgress(state);
+	if(p <= 0.0f){
+		// 跳び立つまでは、跳び立つ点を今の位置に合わせ、着地点の方へ向く
+		enemy.jumpFromX = enemy.x;
+		enemy.jumpFromZ = enemy.z;
+		enemy.jumpFromY = enemy.y;
+		const float toX = enemy.jumpToX - enemy.x, toZ = enemy.jumpToZ - enemy.z;
+		if(toX * toX + toZ * toZ > 1e-4f){
+			enemy.yaw = approachAngle(enemy.yaw, std::atan2(toX, toZ), kind.def.turnSpeed * dt);
+		}
+		return true;
+	}
+	// 空中: 位置は、跳び立つ点から着地点へ直線で、高さは、2点の地面を結ぶ直線 + 放物線(経路は planJump で確かめてあるので、地形の制限は掛けない)。
 	// 着地した後は動かさない(重なりの押し出しで動いた位置を、着地点へ引き戻さない)
-	if(state.motion == Motion::AttackJump && enemy.jumping){
-		const float p = creature.jumpProgress(state);
-		if(p <= 0.0f){
-			enemy.jumpFromX = enemy.x;
-			enemy.jumpFromZ = enemy.z;
-			return true;
-		}
-		enemy.jumping = p < 1.0f;
-		const float fieldW = map.width() * map.cellSize(), fieldD = map.depth() * map.cellSize();
-		const float toX = std::clamp(enemy.jumpFromX + (enemy.jumpToX - enemy.jumpFromX) * p, kRadius, std::max(kRadius, fieldW - kRadius));
-		const float toZ = std::clamp(enemy.jumpFromZ + (enemy.jumpToZ - enemy.jumpFromZ) * p, kRadius, std::max(kRadius, fieldD - kRadius));
-		field::moveOnField(map, rules, kRadius, enemy.x, enemy.z, toX, toZ);
-		enemy.y = map.heightAt(enemy.x, enemy.z) + kind.def.creatureMotion.jump.height * 4.0f * p * (1.0f - p);
-	}
+	enemy.jumping = p < 1.0f;
+	const float fieldW = map.width() * map.cellSize(), fieldD = map.depth() * map.cellSize();
+	enemy.x = std::clamp(enemy.jumpFromX + (enemy.jumpToX - enemy.jumpFromX) * p, kRadius, std::max(kRadius, fieldW - kRadius));
+	enemy.z = std::clamp(enemy.jumpFromZ + (enemy.jumpToZ - enemy.jumpFromZ) * p, kRadius, std::max(kRadius, fieldD - kRadius));
+	enemy.y = enemy.jumping ? enemy.jumpFromY + (enemy.jumpToY - enemy.jumpFromY) * p + enemy.jumpHeight * 4.0f * p * (1.0f - p)
+		: map.heightAt(enemy.x, enemy.z);
 	return true;
 }
 
@@ -901,7 +1069,7 @@ void EnemyHorde::draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewPro
 		transform_.setPos(geo::Vector3f(enemy.x, enemy.y, enemy.z));
 		transform_.setRotation(geo::Quaternionf::createRotater(enemy.yaw, geo::Vector3f(0.0f, 1.0f, 0.0f)));
 		// 倒れ込み・着地の潰れ(地面 = モデルの Y=0 を基準に、高さを縮めて前後・左右へ広げる。地面にめり込まず、浮かない)
-		const CreatureAnimator::BodyScale squash = kind.creature ? kind.creature->bodyScale(enemy.creature) : CreatureAnimator::BodyScale{};
+		const CreatureDriver::BodyScale squash = kind.creature ? kind.creature->bodyScale(enemy.creature) : CreatureDriver::BodyScale{};
 		transform_.setScale(geo::Vector3f(kind.scale * squash.horizontal, kind.scale * squash.vertical, kind.scale * squash.horizontal));
 		window.draw(enemy.model, viewProj, transform_.getMatrix());
 		shadow.draw(window, viewProj, enemy.x, enemy.y, enemy.z, kind.def.shadowRadius, kind.def.shadowOpacity);

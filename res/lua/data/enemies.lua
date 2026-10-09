@@ -2,6 +2,7 @@
 -- 種類ごとに1つの表。無い項目は、C++側の既定値(include/scene/game/EnemyHorde.h の EnemyType、include/model/CreatureBuilder.h の CreatureSpec、
 -- include/scene/game/CreatureAnimator.h の CreatureMotion)のまま。
 -- 体は2通り: creature = { ... }(手続き的に作る丸い生き物の体)か、model = "….pmx"(PMXのファイル。下の例)。
+-- 丸い生き物の体の動きは、clips(glTF のアニメーション)があれば、motions の表のクリップを再生し、無ければ、下の walkFast〜death の値から数式で作る。
 -- いまは、プレイヤーへ向かって歩いて、近づくと攻撃の動きをするだけ(プレイヤーとの当たり判定・戦闘は無し。敵同士は箱(box)で重ならない)
 enemies = {
 	{
@@ -54,6 +55,23 @@ enemies = {
 			},
 			bellyLine = -1.0, -- 背と腹の境目(面の向きの上下の成分。これより上が背の色。-1で全部、背の色。境目は三角形の単位でぎざぎざになるので、色を分けるなら近い色に)
 		},
+		-- 動きのクリップ(glTF の .glb / .gltf のアニメーション)。この行を消すと、下の walkFast〜death の値から、数式で動かす。
+		-- creature.glb は tools/creature2glb が、下の値から焼き込んで書き出したもの(Blender で直して、書き出し直してよい)。
+		-- クリップは「その場」の姿勢だけを持つ: root ボーンの平行移動(ルートモーション)は当てない(前進・跳ぶ高さはゲームが決める。
+		-- 当てないボーンを変えるなら rootMotionBones = { "root" } のように書く)。root の拡大縮小(潰れ)は、体全体の大きさとして使う
+		clips = "res/model/enemy/creature.glb",
+		-- 動き → クリップの名前。loop: 繰り返す。歩きの stride: クリップの1周で進む距離(m。無ければ walkFast / walkSlow の speed × クリップの長さ)。
+		-- 区間の境(秒。クリップの時刻)は、creature2glb が書き出すときにログに出す値。Blender でタイミングを変えたら、ここも直すこと。
+		--   attackStand: 倒れ込み fallStart〜fallEnd、起き上がり recoverStart〜recoverEnd(当たりの箱を前へ伸ばす度合い)
+		--   attackJump: 溜め 〜crouchEnd、踏み切り 〜launchEnd、空中 〜airEnd(この区間を、敵が決めた滞空時間に合わせて伸縮して再生する)、その後は着地・戻り
+		motions = {
+			idle = { clip = "idle", loop = true },
+			walkFast = { clip = "walkFast", loop = true },
+			walkSlow = { clip = "walkSlow", loop = true },
+			attackStand = { clip = "attackStand", fallStart = 1.5, fallEnd = 1.9, recoverStart = 2.5, recoverEnd = 3.2 },
+			attackJump = { clip = "attackJump", crouchEnd = 0.45, launchEnd = 0.55, airEnd = 1.15 },
+			death = { clip = "death" },
+		},
 		-- 歩き(2通り。個体ごとに、behavior.fastRatio の割合で早歩き、残りはゆっくり歩き)。対角の足が同時に出る。角度は付け根・ひざの回転。
 		-- speed: 進む速さ、stride: 1周期(全部の足が1歩ずつ)で進む距離(足の運びの速さは speed÷stride)、duty: 足が接地している割合、
 		-- swing: 足を前後に振る角度、lift・kneeLift: 足を前へ戻す間に、付け根で持ち上げる・ひざを曲げる角度、
@@ -86,16 +104,25 @@ enemies = {
 			-- duration で戻る。bounce は跳ね返り(戻ったあと逆に縦へ伸びる量の、潰れに対する割合)
 			squash = { amount = 0.22, stretch = 0.5, duration = 0.45, bounce = 0.3 },
 		},
-		-- 攻撃B(少し離れた所から): 溜め(体を沈める) → 前へ跳ぶ(放物線) → 足を広げて、お腹から着地 → 止まる → 戻る
+		-- 攻撃B(少し離れた所から): 溜め(体を沈める) → 前へ跳ぶ(放物線) → 足を広げて、お腹から着地 → 止まる → 戻る。
+		-- 跳ぶ軌道は、踏み切りの直前に、敵が決める: 着地点(landGap など) → 跳ぶ距離 → 頂点の高さ(距離に比例。経路の地面・置物を越える高さまで上げる) →
+		-- 滞空時間(√(8 × 高さ ÷ gravity))。越えられない(maxHeight を超える)・着地点に立てないなら、距離を縮め、minDistance より短くなるなら跳ばずに歩く。
+		-- (clips で動かすときも、軌道はこの値。姿勢の値(crouchDepth など)は、数式で動かすときだけ)
 		attackJump = {
 			crouch = 0.45,       -- 溜めの時間
 			crouchDepth = 0.1,   -- 溜めで、胴体を沈める深さ(m)
 			crouchKnee = 0.35,   -- 溜めで、ひざを曲げる角度
 			crouchPitch = -0.08, -- 溜めの胴体の傾き(負で前が下がる)
 			launch = 0.1,        -- 伸び上がる(地面を蹴る)時間
-			air = 0.6,           -- 滞空時間
-			height = 0.9,        -- 跳ぶ高さ(m)
+			air = 0.6,           -- 空中の姿勢の長さ(数式で動かすとき。実際の滞空時間に合わせて伸縮する)
+			height = 0.9,        -- 跳ぶ距離が distance のときの、頂点の高さ(m。距離に比例させる)
 			distance = 3.0,      -- 跳ぶ距離の上限(m)
+			minDistance = 0.8,   -- 跳ぶ距離の下限(m。経路が塞がれて、これより短くしか跳べないなら、跳ばずに歩く)
+			minHeight = 0.4,     -- 頂点の高さの下限(m)
+			maxHeight = 2.5,     -- 頂点の高さの上限(m。経路の障害物を越えるのに、これより高く跳ぶ必要があれば、越えられない)
+			gravity = 20.0,      -- 重力(m/秒²。滞空時間を決める。高さ 0.9 m で 0.6 秒)
+			clearance = 0.2,     -- 経路の置物の上に空ける高さ(m)
+			probeStep = 0.25,    -- 経路の地面・置物の高さを調べる間隔(m)
 			landGap = 1.2,       -- 着地点の、プレイヤーまでの距離(m)
 			landGapJitter = 0.4, -- 同、ばらつき(±m)
 			landAngleJitter = 0.6, -- 着地点の、プレイヤーから見た向きのばらつき(±ラジアン。敵のいる向きから回す)

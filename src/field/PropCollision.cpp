@@ -1,6 +1,7 @@
 #include "field/PropCollision.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 
 namespace field
@@ -10,6 +11,9 @@ PropFootprint computeFootprint(const model::ModelData &data, float sliceTop)
 {
 	PropFootprint result;
 	float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
+	for(const auto &vertex : data.vertices){
+		result.top = std::max(result.top, vertex.position[1]);
+	}
 	auto add = [&](const float p[3]){
 		minX = std::min(minX, p[0]);
 		maxX = std::max(maxX, p[0]);
@@ -69,6 +73,7 @@ void PropCollision::build(const FieldMap &map, const FootprintFn &footprint)
 		box.maxX = shape.maxX * prop.scale;
 		box.minZ = shape.minZ * prop.scale;
 		box.maxZ = shape.maxZ * prop.scale;
+		box.top = map.propBaseY(prop) + shape.top * prop.scale;
 		const int index = static_cast<int>(boxes_.size());
 		boxes_.push_back(box);
 		// 回転した長方形を囲む範囲の格子へ入れる
@@ -169,6 +174,18 @@ bool PropCollision::overlaps(float x, float z, float radius) const
 		}
 	});
 	return hit;
+}
+
+float PropCollision::topAt(float x, float z, float radius) const
+{
+	float top = std::numeric_limits<float>::lowest();
+	forNear(x, z, radius, [&](const Box &box){
+		float px = x, pz = z;
+		if(box.top > top && pushOut(box, px, pz, radius)){
+			top = box.top;
+		}
+	});
+	return top;
 }
 
 } // namespace field

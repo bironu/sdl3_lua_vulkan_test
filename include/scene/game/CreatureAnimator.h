@@ -1,7 +1,7 @@
 #if !defined(GAME_CREATUREANIMATOR_H_)
 #define GAME_CREATUREANIMATOR_H_
 
-#include "model/Skeleton.h"
+#include "scene/game/CreatureDriver.h"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -69,7 +69,8 @@ struct CreatureMotion
 		float recover = 0.7f;     // 起き上がって戻る時間
 		Squash squash;            // 顔から地面に着いた瞬間の潰れ
 	} stand;
-	// 攻撃B: 溜め(体を沈める) → 伸び上がって前へ跳ぶ(位置は EnemyHorde が放物線で動かす) → 足を広げて、お腹から着地 → 止まる → 戻る
+	// 攻撃B: 溜め(体を沈める) → 伸び上がって前へ跳ぶ(位置は EnemyHorde が放物線で動かす) → 足を広げて、お腹から着地 → 止まる → 戻る。
+	// 跳ぶ軌道(着地点・頂点の高さ・滞空時間)は、敵が踏み切りの直前に決める(EnemyHorde)。姿勢を数式で作るときも、クリップを再生するときも、同じ値を使う
 	struct Jump
 	{
 		float crouch = 0.45f;     // 溜めの時間
@@ -77,9 +78,15 @@ struct CreatureMotion
 		float crouchKnee = 0.35f; // 溜めで、ひざを曲げる角度
 		float crouchPitch = -0.08f; // 溜めの胴体の傾き(負で前が下がる)
 		float launch = 0.1f;      // 伸び上がる時間(地面を蹴る)
-		float air = 0.6f;         // 滞空時間
-		float height = 0.9f;      // 跳ぶ高さ(m)
+		float air = 0.6f;         // 空中の動きの長さ(数式の姿勢の時刻。実際の滞空時間は、跳ぶ高さと gravity から決め、この区間を伸縮して合わせる)
+		float height = 0.9f;      // 跳ぶ距離が distance のときの、頂点の高さ(m。距離に比例させ、minHeight〜maxHeight に収める)
 		float distance = 3.0f;    // 跳ぶ距離の上限(m)
+		float minDistance = 0.8f; // 跳ぶ距離の下限(m。経路が塞がれて、これより短くしか跳べないなら、跳ばずに歩く)
+		float minHeight = 0.4f;   // 頂点の高さの下限(m)
+		float maxHeight = 2.5f;   // 頂点の高さの上限(m。経路の障害物を越えるのに、これより高く跳ぶ必要があれば、越えられない)
+		float gravity = 20.0f;    // 重力(m/秒²)。滞空時間 = √(8 × 頂点の高さ ÷ gravity)
+		float clearance = 0.2f;   // 経路の障害物(地面・置物)の上に空ける高さ(m)
+		float probeStep = 0.25f;  // 経路の障害物を調べる間隔(m)
 		float landGap = 1.2f;     // 着地点の、プレイヤーまでの距離(m)
 		float airPitch = 0.25f;   // 跳び上がったときの胴体の傾き(着地までに0へ戻る)
 		float spread = 1.15f;     // 着地で、足を付け根で外へ持ち上げる角度(手足を投げ出す)
@@ -108,47 +115,23 @@ struct CreatureMotion
 // 付け根を振る・持ち上げる回転の軸、ひざ・足首を曲げる軸は、休止ポーズの関節の位置から求める(手足の形によらず、足先が前へ・上へ動く向き)。
 // 足先と胴体(胴体のボーンに付く頂点)のいちばん低い所が地面に着くよう、胴体の高さを合わせ、接地している足は、付け根の持ち上げの角度で
 // 足先を地面へ下ろす(IKは使わない。小さい角度の近似)
-class CreatureAnimator
+class CreatureAnimator : public CreatureDriver
 {
 public:
-	enum class Motion : uint8_t { Idle, WalkFast, WalkSlow, AttackStand, AttackJump, Death };
-	struct State
-	{
-		Motion motion = Motion::Idle;
-		Motion previous = Motion::Idle;
-		float fade = 1.0f;       // motion の重み(0→1 で、previous から移り終わる)
-		float walkPhase = 0.0f;  // 歩きの位相(0〜1で1周期)
-		float clock = 0.0f;      // 待機の時計(秒)
-		float actionTime = 0.0f; // 攻撃・倒れを始めてからの時間(秒。rate を掛けて進む)
-		float rate = 1.0f;       // 待機・攻撃の速さの個体差
-	};
-
 	// skeleton(休止ポーズ)のボーンの名前から、胴体(body)・手足を探す。vertices(休止ポーズ)のうち、胴体のボーンだけに付く頂点を、
 	// 胴体が地面にめり込まないかの判定に使う。metersToModel は、メートル→モデルの単位
 	CreatureAnimator(const model::Skeleton &skeleton, const std::vector<model::ModelVertex> &vertices, const CreatureMotion &motion, float metersToModel);
 
 	size_t legCount() const { return legs_.size(); }
-	// 動きを切り替える(同じなら何もしない)。切り替えの間は、前の動きと混ぜる。攻撃・倒れは、最初から
-	void play(State &state, Motion motion) const;
-	// 時間を進める。speed は歩く速さ(m/秒。歩きの足の運びの速さに使う)
-	void advance(State &state, float dt, float speed) const;
-	// 攻撃の動きの全体の長さ(秒。rate が1のとき)。攻撃でなければ0
-	float duration(Motion motion) const;
-	// 攻撃が終わった(元の姿勢へ戻りきった)か。攻撃でなければ true
-	bool finished(const State &state) const;
-	// 攻撃B(ジャンプ)の、跳んでいる間の進み具合(跳ぶ前は0、跳んでいる間は0→1、着地した後は1)
-	float jumpProgress(const State &state) const;
-	// 攻撃A(倒れ込み)で、胴体が前へ倒れている度合い(0〜1。倒れ込みで0→1、戻りで1→0。攻撃Aでなければ0)
-	float fallen(const State &state) const;
-	// 体全体の大きさの倍率(倒れ込み・着地の潰れと、跳んでいる間の伸び)。描画の側で、地面(モデルの Y=0)を基準に、モデル行列に掛ける
-	struct BodyScale
-	{
-		float vertical = 1.0f;   // 高さ(Y)
-		float horizontal = 1.0f; // 前後・左右(X・Z)
-	};
-	BodyScale bodyScale(const State &state) const;
-	// state の姿勢を skeleton に当てる(resetPose から。update は呼び出し側が行う)
-	void apply(model::Skeleton &skeleton, const State &state) const;
+	float duration(Motion motion) const override;
+	JumpPhases jumpPhases() const override;
+	// 倒れ込みで0→1、戻りで1→0
+	float fallen(const State &state) const override;
+	BodyScale bodyScale(const State &state) const override;
+	void apply(model::Skeleton &skeleton, const State &state) const override;
+
+protected:
+	float stride(Motion motion) const override;
 
 private:
 	struct Leg

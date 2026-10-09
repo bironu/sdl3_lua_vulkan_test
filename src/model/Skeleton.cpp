@@ -132,6 +132,12 @@ Quat Quat::slerp(const Quat &a, const Quat &b, float t)
 	return Quat{s0 * a.x + s1 * end.x, s0 * a.y + s1 * end.y, s0 * a.z + s1 * end.z, s0 * a.w + s1 * end.w}.normalized();
 }
 
+Vec3 Quat::rotate(const Vec3 &v) const
+{
+	const Quat p = *this * Quat{v.x, v.y, v.z, 0.0f} * conjugate();
+	return {p.x, p.y, p.z};
+}
+
 // ---- Skeleton ----
 
 Skeleton::Skeleton(const std::vector<ModelBone> &bones)

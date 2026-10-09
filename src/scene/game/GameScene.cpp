@@ -935,7 +935,7 @@ bool GameScene::onIdle(uint32_t tick)
 	}
 	if(!paused_){
 		updatePlayer(dt, tick);
-		enemies_->update(dt, map_, movementRules_, playerX_, playerZ_);
+		enemies_->update(dt, map_, movementRules_, propCollision_, playerX_, playerZ_);
 	}
 
 	// 三人称のカメラ

@@ -5,6 +5,7 @@
 #include "geo/Matrix.h"
 #include "model/CreatureBuilder.h"
 #include "scene/game/CreatureAnimator.h"
+#include "scene/game/CreatureClipAnimator.h"
 #include "vk/VulkanModel.h"
 #include <cstdint>
 #include <memory>
@@ -21,6 +22,7 @@ class VulkanWindow;
 namespace field
 {
 class FieldMap;
+class PropCollision;
 struct MovementRules;
 }
 
@@ -30,7 +32,8 @@ namespace game
 class BlobShadow;
 
 // 敵の種類の定義。res/lua/data/enemies.lua の表から読む(読めない項目は、ここの既定のまま)。長さはメートル、時間は秒、角度はラジアン。
-// 体は2通り: creature(手続き的に作る丸い生き物の体。動きは CreatureAnimator)か、model(PMXのファイル。動きはMMDの名前のボーンを回す歩き)
+// 体は2通り: creature(手続き的に作る丸い生き物の体。動きは、clips があればクリップの再生(CreatureClipAnimator)、無ければ数式(CreatureAnimator))か、
+// model(PMXのファイル。動きはMMDの名前のボーンを回す歩き)
 struct EnemyType
 {
 	std::string name;
@@ -60,6 +63,7 @@ struct EnemyType
 	float shadowRadius = 0.35f;
 	float shadowOpacity = 0.5f;
 	CreatureMotion creatureMotion; // 丸い生き物の体の動き(表の walkFast / walkSlow / idle / attackStand / attackJump / death)
+	CreatureClipMotion clipMotion; // 丸い生き物の体を、クリップで動かすときの表(表の clips と motions。clips が無ければ使わない)
 	// 丸い生き物の体の行動: 歩いて近づき、プレイヤーとの距離に応じて、攻撃を選ぶ(当たり判定は無く、見た目の動きだけ)
 	struct Behavior
 	{
@@ -120,9 +124,10 @@ struct EnemySize
 EnemySize measureEnemy(const EnemyType &type, const std::vector<model::ModelVertex> &vertices);
 
 // 敵の大軍。個体ごとに位置・向き・歩きの位相・速さの個体差を持ち、毎フレーム、プレイヤーへ向かって歩く(近くで止まる)。
-// 敵同士は、個体ごとの箱(EnemyType::Box)が重ならないよう押し出す(跳んでいる間は、他の敵の上を越える)。プレイヤー・ビルとの当たり・戦闘は無し。アニメーションは手続き的(IKは使わず、FKだけ): 丸い生き物の体は CreatureAnimator(早歩きか、ゆっくり歩きで近づき、
-// 距離に応じて、立ち上がって倒れ込む攻撃か、跳びかかる攻撃をする。跳ぶ間は、位置を放物線で動かす)、
-// PMXは、MMDの名前のボーンを周期的に回す歩き。
+// 敵同士は、個体ごとの箱(EnemyType::Box)が重ならないよう押し出す(跳んでいる間は、他の敵の上を越える)。プレイヤー・ビルとの当たり・戦闘は無し。
+// 丸い生き物の体は、早歩きか、ゆっくり歩きで近づき、距離に応じて、立ち上がって倒れ込む攻撃か、跳びかかる攻撃をする(姿勢は CreatureClipAnimator か CreatureAnimator)。
+// 跳ぶ攻撃の軌道(着地点・頂点の高さ・滞空時間)は、踏み切りの直前に、経路の地面と置物の高さ・着地点に立てるかを見て決め、位置を放物線で動かす
+// (姿勢の空中の区間は、滞空時間に合わせて伸縮する)。PMXは、MMDの名前のボーンを周期的に回す歩き(IKは使わず、FKだけ)。
 // 描画は、個体ごとにVulkanModel(GPUスキニング)を1つずつ持つ(メッシュのGPUバッファは個体の数だけ複製される)。遠い個体は、姿勢の更新を間引く
 class EnemyHorde
 {
@@ -132,8 +137,8 @@ public:
 		float playerX, float playerZ);
 	~EnemyHorde();
 
-	// (targetX, targetZ)(プレイヤー)へ向かって歩かせる(姿勢を当て直す時期も決める)
-	void update(float dt, const field::FieldMap &map, const field::MovementRules &rules, float targetX, float targetZ);
+	// (targetX, targetZ)(プレイヤー)へ向かって歩かせる(姿勢を当て直す時期も決める)。props は置物の当たり(跳ぶ経路の障害物・着地点に使う)
+	void update(float dt, const field::FieldMap &map, const field::MovementRules &rules, const field::PropCollision &props, float targetX, float targetZ);
 	// 画面に見えている敵に、(時期なら)姿勢を当ててから、敵と足元の丸い影を描く(描画の予約)。見えない敵は、姿勢の計算も描画も省く
 	// eye はカメラの目の位置(近すぎる敵は描かない)
 	void draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewProj, const BlobShadow &shadow, const geo::Vector3f &eye);
@@ -147,7 +152,8 @@ private:
 		float scale = 1.0f;     // モデルの単位→メートル
 		float boxWidth = 1.0f, boxLength = 1.0f, boxHeight = 1.0f; // 当たりの箱(m。表の box か、モデルの寸法から)
 		float boundY = 0.5f, boundRadius = 1.0f; // 画面に見えるかの判定の球(足元からの中心の高さと半径。m。手足の動きの分の余裕を含む)
-		std::optional<CreatureAnimator> creature; // 丸い生き物の体の動き(PMXは無し)
+		float bodyRadius = 0.25f; // 跳ぶ経路の障害物を調べる円の半径(m。箱の幅・長さの短い方の半分)
+		std::unique_ptr<CreatureDriver> creature; // 丸い生き物の体の動き(クリップか数式。PMXは無し)
 		// 以下はPMXの歩き用
 		float legLength = 0.0f; // 脚の付け根から足首までの長さ(モデルの単位)。脚を振ったときに腰を下げる分を求める
 		int center = -1, upper = -1, lower = -1;
@@ -168,10 +174,14 @@ private:
 		bool moving = false;
 		bool posedStill = false;  // 止まった姿勢(振れ幅0)を当て済み
 		bool poseDue = false;     // 姿勢を当て直す時期(drawで、見えていれば当てる)
-		CreatureAnimator::State creature; // 丸い生き物の体の動きの状態
+		CreatureDriver::State creature; // 丸い生き物の体の動きの状態
 		bool fast = false;        // 早歩きで歩く(でなければ、ゆっくり歩き)
 		float cooldown = 0.0f;    // 次に攻撃を試すまでの時間
 		float jumpFromX = 0.0f, jumpFromZ = 0.0f, jumpToX = 0.0f, jumpToZ = 0.0f; // 跳ぶ攻撃の、跳び立つ点と着地点
+		float jumpFromY = 0.0f, jumpToY = 0.0f; // 同、地面の高さ
+		float jumpHeight = 0.0f;  // 跳ぶ攻撃の、頂点の高さ(跳び立つ点と着地点を結ぶ直線から。m)
+		float jumpAirRate = 1.0f; // 空中の区間の、動きの時刻の進む速さ(姿勢の空中の区間の長さ ÷ 滞空時間)
+		bool jumpPlanned = false; // 踏み切りの直前に、軌道を決め直した
 		bool pinned = false;      // 前のフレームで、重なりの押し出しを地形に止められた(壁際・崖際。押し出されにくくする)
 		bool jumping = false;     // 跳ぶ攻撃の、着地するまで(位置を、跳び立つ点から着地点へ動かす間)
 	};
@@ -192,8 +202,10 @@ private:
 	void resolveOverlaps(const field::FieldMap &map, const field::MovementRules &rules);
 	float overlapAt(const Enemy &self, float x, float z) const;
 	void chooseLanding(const Kind &kind, Enemy &enemy, float targetX, float targetZ, const field::FieldMap &map);
+	static bool planJump(const Kind &kind, Enemy &enemy, const field::FieldMap &map, const field::MovementRules &rules, const field::PropCollision &props,
+		bool hopInPlace);
 	bool updateCreature(const Kind &kind, Enemy &enemy, float dt, float distance, float dx, float dz, const field::FieldMap &map,
-		const field::MovementRules &rules);
+		const field::MovementRules &rules, const field::PropCollision &props);
 	void applyPose(const Kind &kind, Enemy &enemy) const;
 	void applyGait(const Kind &kind, Enemy &enemy) const;
 

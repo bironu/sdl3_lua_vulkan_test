@@ -26,12 +26,6 @@ model::Vec3 normalize(const model::Vec3 &a, const model::Vec3 &fallback)
 	const float l = length(a);
 	return l > 1e-6f ? model::Vec3{a.x / l, a.y / l, a.z / l} : fallback;
 }
-model::Vec3 rotateVector(const model::Quat &q, const model::Vec3 &v)
-{
-	const model::Quat p = q * model::Quat{v.x, v.y, v.z, 0.0f} * q.conjugate();
-	return {p.x, p.y, p.z};
-}
-
 model::Vec3 restPosition(const model::Skeleton &skeleton, int bone)
 {
 	const auto &p = skeleton.bone(bone).position;
@@ -73,7 +67,7 @@ const model::Vec3 kAxisZ{0.0f, 0.0f, 1.0f};
 
 CreatureAnimator::CreatureAnimator(const model::Skeleton &skeleton, const std::vector<model::ModelVertex> &vertices, const CreatureMotion &motion,
 	float metersToModel)
-	: motion_(motion), toModel_(metersToModel)
+	: CreatureDriver(motion.blend), motion_(motion), toModel_(metersToModel)
 {
 	body_ = skeleton.findBone("body");
 	// 手足: <name>_left_hip / <name>_right_hip から、同じ頭の knee / ankle / foot を探す
@@ -165,22 +159,6 @@ CreatureAnimator::CreatureAnimator(const model::Skeleton &skeleton, const std::v
 	}
 }
 
-void CreatureAnimator::play(State &state, Motion motion) const
-{
-	if(motion == state.motion){
-		return;
-	}
-	if(motion == state.previous){
-		state.fade = 1.0f - state.fade; // 戻る途中なら、そこから戻す
-	}
-	else{
-		state.fade = 0.0f;
-	}
-	state.previous = state.motion;
-	state.motion = motion;
-	state.actionTime = 0.0f;
-}
-
 const CreatureMotion::Walk *CreatureAnimator::walkOf(Motion motion) const
 {
 	switch(motion){
@@ -190,18 +168,10 @@ const CreatureMotion::Walk *CreatureAnimator::walkOf(Motion motion) const
 	}
 }
 
-void CreatureAnimator::advance(State &state, float dt, float speed) const
+float CreatureAnimator::stride(Motion motion) const
 {
-	state.fade = std::min(1.0f, state.fade + dt * motion_.blend);
-	const CreatureMotion::Walk *walk = walkOf(state.motion);
-	if(!walk && state.fade < 1.0f){
-		walk = walkOf(state.previous);
-	}
-	if(walk){
-		state.walkPhase = fract(state.walkPhase + dt * speed / std::max(walk->stride, 0.05f));
-	}
-	state.clock += dt * state.rate;
-	state.actionTime += dt * state.rate;
+	const CreatureMotion::Walk *walk = walkOf(motion);
+	return walk ? std::max(walk->stride, 0.05f) : 0.0f;
 }
 
 float CreatureAnimator::duration(Motion motion) const
@@ -215,15 +185,10 @@ float CreatureAnimator::duration(Motion motion) const
 	}
 }
 
-bool CreatureAnimator::finished(const State &state) const
-{
-	return state.actionTime >= duration(state.motion);
-}
-
-float CreatureAnimator::jumpProgress(const State &state) const
+CreatureDriver::JumpPhases CreatureAnimator::jumpPhases() const
 {
 	const auto &j = motion_.jump;
-	return state.motion == Motion::AttackJump ? progress(state.actionTime, j.crouch + j.launch, j.air) : 0.0f;
+	return {j.crouch, j.crouch + j.launch, j.crouch + j.launch + j.air};
 }
 
 CreatureAnimator::StandPhase CreatureAnimator::standPhase(float t) const
@@ -453,7 +418,7 @@ void CreatureAnimator::apply(model::Skeleton &skeleton, const State &state) cons
 	// (胴体のボーンの位置から支点への腕 arm が、回したあとも支点に戻るよう、arm - R arm だけ動かす)
 	const model::Quat rotation = model::Quat::fromAxisAngle(kAxisX, p.pitch) * model::Quat::fromAxisAngle(kAxisZ, p.roll);
 	const model::Vec3 arm = (rearPivot_ - bodyRest_) * p.pivot;
-	const model::Vec3 offset = arm - rotateVector(rotation, arm) + model::Vec3{p.sway * toModel_, 0.0f, -p.lunge * toModel_};
+	const model::Vec3 offset = arm - rotation.rotate(arm) + model::Vec3{p.sway * toModel_, 0.0f, -p.lunge * toModel_};
 	skeleton.setBoneRotation(body_, rotation);
 	skeleton.setBoneTranslation(body_, offset);
 	// いったん上下に動かさずに解いて、足先と胴体のいちばん低い所を求める(浮いている足でも、地面より下へ行くなら、その足で支える)

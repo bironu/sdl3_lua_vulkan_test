@@ -4,17 +4,24 @@
 //   書き出した後、エンジンの glTF の読み込み(model::loadVrm)で読み直して、頂点・ボーンが元と一致するかを確かめる(合わなければ終了コード1)
 // 中身(VRMの拡張は無い、ふつうの glTF):
 //   - メッシュ1つ(材質ごとのプリミティブ。POSITION・NORMAL・JOINTS_0・WEIGHTS_0。UV無し)、材質(色だけ)、スキン(ボーンのノードの階層)
-//   - アニメーション: rest(休止ポーズ。1キー)、idle・walkFast・walkSlow(1周期。ループ)、attackStand・attackJump・death(全体)。30fps、LINEAR。
-//     個体差は無し(標準の動き)。攻撃Bの跳ぶ位置(前へ進む分と高さ)は root の translation、潰れ・伸びは root の scale(地面 Y=0 が基準)
+//   - アニメーション: rest(休止ポーズ。1キー)、idle・walkFast・walkSlow(1周期。ループ)、attackStand・attackJump・death(全体)。30fps(ループは1周に24キー以上)、LINEAR。
+//     個体差は無し(標準の動き)。潰れ・伸びは root の scale(地面 Y=0 が基準)
+//   - クリップは「その場」の姿勢だけを持つ(root の translation は動かさない。ゲームは root の平行移動を当てない = ルートモーションはゲームが決める)。
+//     攻撃B(attackJump)は、溜め → 踏み切り → 空中(足を広げる) → 着地(びたーん)の姿勢だけで、跳ぶ高さ・距離・向き・滞空時間は、
+//     敵がその場(プレイヤーとの距離・経路の障害物)に応じて決める(EnemyHorde。空中の区間は、滞空時間に合わせて伸縮して再生する)
+//   - 書き出したときに、攻撃A・攻撃Bの区間の境(秒)をログに出す。enemies.lua の motions(attackStand の fallStart など、attackJump の crouchEnd など)は、
+//     この値に合わせる。Blender でタイミング(キーの時刻)を変えたら、enemies.lua の区間の秒も直すこと
 //   - 単位はメートル(enemies.lua の length などで合わせた、ゲームの中の大きさ)。座標は glTF の右手系(+Y上、正面+Z)
 // Blender での使い方(メモ):
 //   - 読み込み: ファイル > インポート > glTF 2.0。既定の設定でよい(「ボーンの方向」は Blender か Temperance。ボーンの向きは見た目だけで、動きは変わらない)。
 //     Blender は Z が上なので、+Y上 → +Z上 に直して読まれる(正面は -Y。フロントビュー(テンキー1)で顔がこちらを向く)
 //   - アニメーションは、glTF のアニメーションごとに「アクション」として入る(名前は rest / idle など)。最初の1つがアーマチュアに付き、
 //     残りは NLA のトラックに入る。ドープシート > アクションエディターで切り替えて見る・直す
-//   - root ボーンの位置・拡大縮小にも、キーがある(跳ぶ移動・潰れ)。全部のアクションが、同じボーン・同じ種類のチャンネルを持つ(切り替えても前の姿勢が残らない)
+//   - root ボーンの拡大縮小にも、キーがある(潰れ)。全部のアクションが、同じボーン・同じ種類のチャンネルを持つ(切り替えても前の姿勢が残らない)。
+//     root を動かしても(位置)、ゲームでは当てない(ルートモーションはゲームが決める)
 //   - 書き出し直し: ファイル > エクスポート > glTF 2.0、形式は glTF バイナリ(.glb)、「+Y上」をオン、アニメーションの「モード」を「アクション」にして、
-//     全部のアクションを書き出す。ゲームはいまは、この .glb のアニメーションを読まない(形だけ。動きは CreatureAnimator の数式)
+//     全部のアクションを書き出す。ゲームは、enemies.lua の clips に書いた .glb / .gltf のアニメーションを、motions の表のクリップの名前で再生する
+//     (CreatureClipAnimator。clips が無ければ、CreatureAnimator の数式で動かす)
 #include "model/CreatureBuilder.h"
 #include "model/GlbWriter.h"
 #include "model/GltfLoader.h"
@@ -34,6 +41,7 @@ namespace
 
 using Motion = game::CreatureAnimator::Motion;
 constexpr float kFps = 30.0f;
+constexpr int kMinLoopKeys = 24; // ループの1周のキーの数の下限(短い周期の歩きでも、補間で足の運びがなまらないよう)
 constexpr float kEpsilon = 1e-5f; // これより変化しないチャンネルは、1つのキーにする
 
 // 座標系の変換(ModelData の左手系 → glTF の右手系): Z方向の鏡像。位置は z を反転する(scale を掛けてメートルにする)。
@@ -59,9 +67,8 @@ struct Clip
 	bool rest; // 休止ポーズ(1キー)
 };
 
-// clip の、時刻 t の全部のボーンの姿勢を求める(個体差は無し)。攻撃Bの跳ぶ移動・高さ(EnemyHorde と同じ放物線)と、潰れを root に入れる
-std::vector<NodePose> bakePose(const game::CreatureAnimator &animator, model::Skeleton &skeleton, const game::EnemyType &type, float scale,
-	float jumpTravel, const Clip &clip, float t)
+// clip の、時刻 t の全部のボーンの姿勢を求める(個体差は無し)。潰れを root の scale に入れる(root の位置は動かさない: その場のクリップ)
+std::vector<NodePose> bakePose(const game::CreatureAnimator &animator, model::Skeleton &skeleton, float scale, const Clip &clip, float t)
 {
 	game::CreatureAnimator::State state;
 	state.motion = state.previous = clip.motion;
@@ -86,17 +93,13 @@ std::vector<NodePose> bakePose(const game::CreatureAnimator &animator, model::Sk
 	}
 	const int root = skeleton.findBone("root");
 	if(root >= 0){
-		NodePose &r = poses[static_cast<size_t>(root)];
-		const float p = animator.jumpProgress(state);
-		r.translation.y += type.creatureMotion.jump.height * 4.0f * p * (1.0f - p);
-		r.translation.z += jumpTravel * p; // 正面は glTF の +Z
 		const game::CreatureAnimator::BodyScale squash = animator.bodyScale(state);
-		r.scale = {squash.horizontal, squash.vertical, squash.horizontal};
+		poses[static_cast<size_t>(root)].scale = {squash.horizontal, squash.vertical, squash.horizontal};
 	}
 	return poses;
 }
 
-// clip のキーの時刻: ループは1周期を等分(最後は周期の終わり = 最初と同じ姿勢)、それ以外は 1/30 秒ごと(最後は全体の長さ)
+// clip のキーの時刻: ループは1周期を等分(1/30 秒ごと。ただし kMinLoopKeys 以上。最後は周期の終わり = 最初と同じ姿勢)、それ以外は 1/30 秒ごと(最後は全体の長さ)
 std::vector<float> sampleTimes(const Clip &clip)
 {
 	std::vector<float> times;
@@ -105,7 +108,7 @@ std::vector<float> sampleTimes(const Clip &clip)
 		return times;
 	}
 	if(clip.loop){
-		const int n = std::max(2, static_cast<int>(std::lround(clip.length * kFps)));
+		const int n = std::max(kMinLoopKeys, static_cast<int>(std::lround(clip.length * kFps)));
 		for(int i = 0; i <= n; ++i){
 			times.push_back(clip.length * static_cast<float>(i) / static_cast<float>(n));
 		}
@@ -164,10 +167,7 @@ int main(int argc, char *argv[])
 	const game::CreatureAnimator animator(skeleton, data->vertices, type.creatureMotion, 1.0f / scale);
 	const size_t boneCount = data->bones.size();
 
-	// 攻撃Bで前へ跳ぶ距離: 攻撃Bを始められる距離(jumpMin〜jumpRange)の真ん中から、着地点の、プレイヤーまでの距離を引いたもの(distance まで)
 	const auto &motion = type.creatureMotion;
-	const auto &behavior = type.behavior;
-	const float jumpTravel = std::clamp(0.5f * (behavior.jumpMin + behavior.jumpRange) - motion.jump.landGap, 0.0f, std::max(motion.jump.distance, 0.0f));
 	const std::vector<Clip> clips = {
 		{"rest", Motion::Idle, 0.0f, false, true},
 		{"idle", Motion::Idle, 2.0f * std::max(motion.idle.period, 0.1f), true, false}, // 前足の振りが呼吸の半分の速さなので、2周期で1周
@@ -185,7 +185,7 @@ int main(int argc, char *argv[])
 		clipTimes.push_back(sampleTimes(clip));
 		auto &frames = clipPoses.emplace_back();
 		for(const float t : clipTimes.back()){
-			frames.push_back(bakePose(animator, skeleton, type, scale, jumpTravel, clip, t));
+			frames.push_back(bakePose(animator, skeleton, scale, clip, t));
 		}
 	}
 	const std::vector<NodePose> &restPose = clipPoses.front().front();
@@ -358,6 +358,14 @@ int main(int argc, char *argv[])
 	}
 	SDL_Log("creature2glb: wrote %s ('%s', scale %.4f, %zu vertices, %zu triangles, %zu bones, %d primitives)", fullPath.c_str(), type.name.c_str(),
 		static_cast<double>(scale), loadOrder.size(), data->indices.size() / 3, boneCount, primitiveCount);
+	// 区間の境(秒): enemies.lua の motions に合わせて書く値
+	const auto &a = motion.stand;
+	const game::CreatureDriver::JumpPhases jump = animator.jumpPhases();
+	const float fallStart = a.rise + a.wiggle, fallEnd = fallStart + a.fall, recoverStart = fallEnd + a.hold, recoverEnd = recoverStart + a.recover;
+	SDL_Log("creature2glb: phases for enemies.lua motions: attackStand = { fallStart = %.3f, fallEnd = %.3f, recoverStart = %.3f, recoverEnd = %.3f }",
+		static_cast<double>(fallStart), static_cast<double>(fallEnd), static_cast<double>(recoverStart), static_cast<double>(recoverEnd));
+	SDL_Log("creature2glb: phases for enemies.lua motions: attackJump = { crouchEnd = %.3f, launchEnd = %.3f, airEnd = %.3f }",
+		static_cast<double>(jump.crouchEnd), static_cast<double>(jump.launchEnd), static_cast<double>(jump.airEnd));
 
 	// 確認: エンジンの読み込みで読み直す(ModelData の座標系へ戻るので、元の頂点・ボーンに scale を掛けたものと一致するはず)。
 	// 読み込みは全部のノードをボーンにするので、ボーンはメッシュのノードの分だけ1つ多い
