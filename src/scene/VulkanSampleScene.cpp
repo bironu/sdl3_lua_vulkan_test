@@ -1,3 +1,4 @@
+#include "app/Application.h"
 #include "scene/VulkanSampleScene.h"
 #include <algorithm>
 #include "resources/Resources.h"
@@ -551,7 +552,7 @@ bool VulkanSampleScene::onIdle(uint32_t tick)
 	{
 		const float dt = lastCameraTick_ != 0 ? std::min(static_cast<float>(realTick - lastCameraTick_) * 0.001f, 0.1f) : 0.0f;
 		lastCameraTick_ = realTick;
-		const bool *keys = SDL_GetKeyboardState(nullptr);
+		const bool *keys = Application::getKeybordState();
 		const float right = (keys[SDL_SCANCODE_D] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_A] ? 1.0f : 0.0f);
 		const float forward = (keys[SDL_SCANCODE_W] ? 1.0f : 0.0f) - (keys[SDL_SCANCODE_S] ? 1.0f : 0.0f);
 		const float speed = cameraDistance_ * 0.6f * dt;

@@ -1,3 +1,4 @@
+#include "app/Application.h"
 #include "ui/UiScript.h"
 #include "ui/HudWidgets.h"
 #include "ui/MenuWidgets.h"
@@ -356,7 +357,7 @@ bool UiScript::load(const std::string &path)
 			return pad && pad->button(button);
 		}
 		const SDL_Scancode code = SDL_GetScancodeFromName(name.c_str());
-		const bool *keys = SDL_GetKeyboardState(nullptr);
+		const bool *keys = Application::getKeybordState();
 		return code != SDL_SCANCODE_UNKNOWN && keys[code];
 	};
 	inputTable["axis"] = [inputResources](const std::string &name){

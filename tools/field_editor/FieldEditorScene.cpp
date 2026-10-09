@@ -1,3 +1,4 @@
+#include "app/Application.h"
 #include "FieldEditorScene.h"
 #include "field/PropCatalog.h"
 #include "geo/AffineMap.h"
@@ -220,7 +221,7 @@ void FieldEditorScene::sculpt(float x, float z, float dt)
 	const float cell = map_.cellSize();
 	const float reach = static_cast<float>(radius_ + 1);
 	const int cx = static_cast<int>(std::round(x / cell)), cz = static_cast<int>(std::round(z / cell));
-	const bool lowerKey = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LSHIFT] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RSHIFT];
+	const bool lowerKey = Application::getKeybordState()[SDL_SCANCODE_LSHIFT] || Application::getKeybordState()[SDL_SCANCODE_RSHIFT];
 	int tool = tool_;
 	if(lowerKey && tool == ToolRaise){
 		tool = ToolLower;
@@ -833,7 +834,7 @@ bool FieldEditorScene::onIdle(uint32_t tick)
 	}
 
 	// カメラの移動(W/A/S/D)・回転(Q/E)
-	const bool *keys = SDL_GetKeyboardState(nullptr);
+	const bool *keys = Application::getKeybordState();
 	const float move = (keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A]) * 1.0f;
 	const float forwardMove = (keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]) * 1.0f;
 	const float speed = distance_ * 0.8f * dt;
