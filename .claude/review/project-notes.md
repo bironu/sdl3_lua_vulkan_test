@@ -1,0 +1,34 @@
+# プロジェクト固有のレビュー観点
+
+レビュアーと裁判官は、レビュー開始時にこのファイルを読むこと。
+
+## 環境
+- C++20 / CMake。SDL3、Vulkan、Lua 5.5 (sol2 経由)、macOS (MoltenVK 想定)。
+- ソースは `src/` 配下のモジュール別。`tools/` は変換ツール・フィールドエディタ。
+- `build/` `dist/` は生成物。レビュー対象外。`res/` はアセット。
+
+## Vulkan
+- オブジェクトの破棄順 (子 → 親、`vkDeviceWaitIdle` 後)。デストラクタでの解放漏れ。
+- 描画中のフレームが参照するバッファ・イメージ・ディスクリプタの早期破棄。
+- `VkResult` の未確認。スワップチェーン再作成 (リサイズ) 時の旧リソース破棄。
+- コマンドバッファ記録とフレームごとのリソース (frames in flight) の取り違え。
+- メモリマップの解除漏れ、アライメント (UBO/push constant) 違反。
+
+## SDL3
+- `SDL_Create*` / `SDL_Load*` と `SDL_Destroy*` / `SDL_Free` の対応。戻り値 NULL 確認。
+- SDL3 は戻り値が bool の API が多い (SDL2 の 0=成功 と混同しない)。
+- SDLMix/TTF/Image の解放漏れ。ラッパークラス (`src/sdl/`) のコピー・ムーブ時の二重解放。
+
+## Lua / sol2
+- Lua スタックの push/pop 不均衡。`lua_State` の寿命と、それを参照する C++ オブジェクトの寿命。
+- sol2 のコールバックに渡した C++ ポインタ/参照のダングリング。
+- Lua 側の例外・エラーを握りつぶしていないか。
+
+## 設計上の既知事項
+- シーンは `SceneHost` が管理する。`src/scene/` 以下の新規シーンは `SceneRegistry` に登録される。
+- 同種のローダー (`FbxLoader` `GltfLoader` `PmxLoader` `VmdLoader`) は構造が似るのは許容。
+  ただし中身の同一ロジック (数学処理・パース補助) の重複は指摘する。
+- ゲーム・モーション系は frame 毎に呼ばれる。毎フレームのヒープ確保・コピーは指摘する。
+
+## 無視してよいもの
+- `build/` `dist/` 生成物、`res/` のデータ、`motion_src/`。
