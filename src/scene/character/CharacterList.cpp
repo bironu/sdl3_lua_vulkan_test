@@ -1,5 +1,5 @@
 #include "scene/character/CharacterList.h"
-#include "resources/ResourcePaths.h"
+#include "resources/LuaTable.h"
 #include <SDL3/SDL_log.h>
 #include <sol/sol.hpp>
 
@@ -10,16 +10,8 @@ std::vector<CharacterInfo> loadCharacterList(const std::string &relativePath)
 {
 	std::vector<CharacterInfo> result;
 	sol::state lua;
-	lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
-	const auto loaded = lua.safe_script_file(ResourcePaths::resource(relativePath.c_str()), sol::script_pass_on_error);
-	if(!loaded.valid()){
-		const sol::error error = loaded;
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "characters: script error (%s): %s", relativePath.c_str(), error.what());
-		return result;
-	}
-	const sol::optional<sol::table> list = lua["characters"];
+	const sol::optional<sol::table> list = loadLuaTable(lua, relativePath, "characters", "characters");
 	if(!list){
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "characters: no 'characters' table in %s", relativePath.c_str());
 		return result;
 	}
 	for(size_t i = 1; i <= list->size(); ++i){

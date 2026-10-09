@@ -12,6 +12,7 @@ FieldRenderer::FieldRenderer(SDL_::VulkanWindow &window, const field::FieldMap &
 	: window_(window)
 	, tiles_(tiles)
 {
+	materials_.reserve(tiles_.size());
 	for(const auto &tile : tiles_){
 		auto image = std::make_shared<SDL_::Image>(1, 1);
 		image->fillRect(SDL_::Color(tile.r, tile.g, tile.b, 255));
@@ -36,7 +37,7 @@ void FieldRenderer::invalidate(int x0, int z0, int x1, int z1)
 	const int cx1 = std::min((x1 + 1) / kChunkSize, chunksX_ - 1), cz1 = std::min((z1 + 1) / kChunkSize, chunksZ_ - 1);
 	for(int cz = cz0; cz <= cz1; ++cz){
 		for(int cx = cx0; cx <= cx1; ++cx){
-			dirty_[static_cast<size_t>(cz) * chunksX_ + cx] = true;
+			dirty_[chunkIndex(cx, cz)] = true;
 		}
 	}
 }
@@ -45,9 +46,10 @@ void FieldRenderer::update(const field::FieldMap &map)
 {
 	for(int cz = 0; cz < chunksZ_; ++cz){
 		for(int cx = 0; cx < chunksX_; ++cx){
-			if(dirty_[static_cast<size_t>(cz) * chunksX_ + cx]){
+			const size_t idx = chunkIndex(cx, cz);
+			if(dirty_[idx]){
 				build(map, cx, cz);
-				dirty_[static_cast<size_t>(cz) * chunksX_ + cx] = false;
+				dirty_[idx] = false;
 			}
 		}
 	}
@@ -58,10 +60,12 @@ void FieldRenderer::build(const field::FieldMap &map, int chunkX, int chunkZ)
 	const float cell = map.cellSize();
 	const int x0 = chunkX * kChunkSize, z0 = chunkZ * kChunkSize;
 	const int x1 = std::min(x0 + kChunkSize, map.width()), z1 = std::min(z0 + kChunkSize, map.depth());
-	auto &chunk = meshes_[static_cast<size_t>(chunkZ) * chunksX_ + chunkX];
-	for(size_t type = 0; type < tiles_.size(); ++type){
+	auto &chunk = meshes_[chunkIndex(chunkX, chunkZ)];
+	for(int type = 0; type < static_cast<int>(tiles_.size()); ++type){
 		std::vector<vk_::Vertex> vertices;
 		std::vector<uint32_t> indices;
+		vertices.reserve((x1 - x0) * (z1 - z0) * 4);
+		indices.reserve((x1 - x0) * (z1 - z0) * 6);
 		for(int z = z0; z < z1; ++z){
 			for(int x = x0; x < x1; ++x){
 				if(map.get(x, z) != type){
@@ -88,10 +92,10 @@ void FieldRenderer::build(const field::FieldMap &map, int chunkX, int chunkZ)
 			}
 		}
 		if(vertices.empty()){
-			chunk[type] = nullptr;
+			chunk[static_cast<size_t>(type)] = nullptr;
 			continue;
 		}
-		chunk[type] = std::make_shared<VulkanMesh>(window_.getContext(), vertices.data(), static_cast<uint32_t>(vertices.size()),
+		chunk[static_cast<size_t>(type)] = std::make_shared<VulkanMesh>(window_.getContext(), vertices.data(), static_cast<uint32_t>(vertices.size()),
 			indices.data(), static_cast<uint32_t>(indices.size()));
 	}
 }

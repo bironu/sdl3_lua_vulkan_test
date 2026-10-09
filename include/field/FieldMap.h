@@ -89,6 +89,7 @@ public:
 	const std::vector<PlacedProp> &props() const { return props_; }
 	// モデルの名前(res/prop/ の中のファイル名)→番号(無ければ足す)
 	uint16_t propId(const std::string &name);
+	size_t propNameCount() const { return propNames_.size(); }
 	const std::string &propName(uint16_t id) const { return propNames_[id]; }
 	// 置く。liftは地面からの持ち上げ(メートル)。番号を返す
 	size_t addProp(const std::string &name, float x, float z, float yaw, float scale, float lift = 0.0f);

@@ -36,6 +36,17 @@ inline std::string join(const char *dir, const char *relative)
 {
 	return std::string(dir) + "/" + relative;
 }
+
+// スクリプトパスから ".assets.lua" の名前を生成する(例: "res/lua/ui/hud.lua" -> "res/lua/ui/hud.assets.lua")
+inline std::string assetsManifestFor(const std::string &script)
+{
+	std::string result = script;
+	const auto dot = result.rfind(".lua");
+	if(dot != std::string::npos){
+		result.replace(dot, 4, ".assets.lua");
+	}
+	return result;
+}
 }
 
 #endif // RESOURCE_PATHS_H_

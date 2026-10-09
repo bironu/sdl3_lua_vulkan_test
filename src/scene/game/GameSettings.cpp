@@ -1,5 +1,5 @@
 #include "scene/game/GameSettings.h"
-#include "resources/ResourcePaths.h"
+#include "resources/LuaTable.h"
 #include <SDL3/SDL_log.h>
 #include <sol/sol.hpp>
 
@@ -15,22 +15,21 @@ void readFloat(const sol::optional<sol::table> &table, const char *key, float &v
 		value = table->get_or(key, value);
 	}
 }
+
+void readBool(const sol::optional<sol::table> &table, const char *key, bool &value)
+{
+	if(table){
+		value = table->get_or(key, value);
+	}
+}
 }
 
 GameSettings loadGameSettings(const std::string &relativePath)
 {
 	GameSettings result;
 	sol::state lua;
-	lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
-	const auto loaded = lua.safe_script_file(ResourcePaths::resource(relativePath.c_str()), sol::script_pass_on_error);
-	if(!loaded.valid()){
-		const sol::error error = loaded;
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "game settings error (%s): %s", relativePath.c_str(), error.what());
-		return result;
-	}
-	const sol::optional<sol::table> settings = lua["settings"];
+	const sol::optional<sol::table> settings = loadLuaTable(lua, relativePath, "settings", "game settings");
 	if(!settings){
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "game settings: no 'settings' table in %s", relativePath.c_str());
 		return result;
 	}
 	const sol::optional<sol::table> motion = (*settings)["motion"], climb = (*settings)["climb"], player = (*settings)["player"], input = (*settings)["input"], camera = (*settings)["camera"], fade = (*settings)["fade"];
@@ -44,6 +43,8 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(player, "rollStartOffset", result.player.rollStartOffset);
 	readFloat(player, "rollCancelProgress", result.player.rollCancelProgress);
 	readFloat(player, "rollMotionTravel", result.player.rollMotionTravel);
+	readFloat(player, "shadowRadius", result.player.shadowRadius);
+	readFloat(player, "shadowOpacity", result.player.shadowOpacity);
 	readFloat(player, "turnSpeed", result.player.turnSpeed);
 	readFloat(motion, "seamThreshold", result.motion.seamThreshold);
 	readFloat(motion, "loopBlend", result.motion.loopBlend);
@@ -60,7 +61,7 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(input, "moveExit", result.input.moveExit);
 	readFloat(input, "tapTime", result.input.tapTime);
 	readFloat(input, "triggerOn", result.input.triggerOn);
-	readFloat(input, "rollOnPress", result.input.rollOnPress);
+	readBool(input, "rollOnPress", result.input.rollOnPress);
 	readFloat(camera, "referenceHeight", result.camera.referenceHeight);
 	readFloat(camera, "height", result.camera.height);
 	readFloat(camera, "minEyeHeight", result.camera.minEyeHeight);
@@ -71,6 +72,10 @@ GameSettings loadGameSettings(const std::string &relativePath)
 	readFloat(camera, "minArm", result.camera.minArm);
 	readFloat(camera, "armRecover", result.camera.armRecover);
 	readFloat(camera, "bodyDistance", result.camera.bodyDistance);
+	readFloat(camera, "fov", result.camera.fov);
+	readFloat(camera, "near", result.camera.nearPlane);
+	readFloat(camera, "far", result.camera.farPlane);
+	readFloat(camera, "mouseSpeed", result.camera.mouseSpeed);
 	readFloat(camera, "approachFraction", result.camera.approachFraction);
 	readFloat(fade, "toAction", result.fade.toAction);
 	readFloat(fade, "fromAction", result.fade.fromAction);
@@ -83,16 +88,8 @@ std::vector<std::string> loadMotionPaths(const std::string &manifestPath, const 
 {
 	std::vector<std::string> paths(names.size());
 	sol::state lua;
-	lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::string, sol::lib::table);
-	const auto loaded = lua.safe_script_file(ResourcePaths::resource(manifestPath.c_str()), sol::script_pass_on_error);
-	if(!loaded.valid()){
-		const sol::error error = loaded;
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "motion table error (%s): %s", manifestPath.c_str(), error.what());
-		return paths;
-	}
-	const sol::optional<sol::table> motions = lua["motions"];
+	const sol::optional<sol::table> motions = loadLuaTable(lua, manifestPath, "motions", "motion table");
 	if(!motions){
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "motion table: no 'motions' table in %s", manifestPath.c_str());
 		return paths;
 	}
 	for(size_t i = 0; i < names.size(); ++i){

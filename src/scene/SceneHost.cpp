@@ -66,7 +66,7 @@ void SceneHost::clearResumeStack(size_t keepCount)
 	while (stackResumeScene_.size() > keepCount) {
 		auto scene = std::move(stackResumeScene_.top());
 		stackResumeScene_.pop();
-		scene->onSuspend();
+		// 積まれていた時点でonSuspend済み。ここではonDestroyだけ
 		scene->onDestroy(tick);
 	}
 	if (currentScene_) {

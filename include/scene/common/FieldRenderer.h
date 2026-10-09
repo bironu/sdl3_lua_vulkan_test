@@ -36,6 +36,7 @@ public:
 
 private:
 	void build(const field::FieldMap &map, int chunkX, int chunkZ);
+	size_t chunkIndex(int chunkX, int chunkZ) const { return static_cast<size_t>(chunkZ) * chunksX_ + chunkX; }
 
 	SDL_::VulkanWindow &window_;
 	std::vector<field::TileDef> tiles_;

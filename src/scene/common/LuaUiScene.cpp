@@ -1,11 +1,12 @@
 #include "scene/common/LuaUiScene.h"
 #include "app/Application.h"
 #include "scene/SceneHost.h"
+#include "scene/common/SceneWindow.h"
 #include "scene/common/ScreenCoords.h"
 #include "scene/SceneRegistry.h"
 #include "sdl/SDLVulkanWindow.h"
+#include "resources/ResourcePaths.h"
 #include "resources/ResourceSet.h"
-#include "sdl/SDLGamepad.h"
 #include "sdl/SDLMixAudio.h"
 #include "sdl/SDLMixMixer.h"
 #include "ui/PadNames.h"
@@ -14,10 +15,6 @@
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_log.h>
 #include <algorithm>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <vector>
 
 namespace game
 {
@@ -46,17 +43,10 @@ void LuaUiScene::changeScene(const std::string &name)
 void LuaUiScene::onCreate(uint32_t tick)
 {
 	Scene::onCreate(tick);
-	auto &window = static_cast<SDL_::VulkanWindow &>(getWindow());
+	auto &window = vulkanWindow(*this);
 	window.setClearColor(0.0f, 0.0f, 0.0f);
 	// このシーンが使うデータの読み込み一覧(スクリプトと同じ名前の ".assets.lua")があれば、先に全部読む
-	{
-		std::string manifest = scriptPath_;
-		const auto dot = manifest.rfind(".lua");
-		if(dot != std::string::npos){
-			manifest.replace(dot, 4, ".assets.lua");
-			resources().loadManifest(manifest);
-		}
-	}
+	resources().loadManifest(ResourcePaths::assetsManifestFor(scriptPath_));
 	ctx_ = std::make_unique<ui::UiContext>(window, getResources(), resources());
 	ui::UiScript::Callbacks callbacks;
 	callbacks.changeScene = [this](const std::string &name){ changeScene(name); };
@@ -153,7 +143,7 @@ bool LuaUiScene::onIdle(uint32_t tick)
 		return running;
 	}
 	script_->update(dt, static_cast<float>(tick - startTick_) * 0.001f);
-	onFrame(tick);
+	onFrame(tick, dt);
 	if(isFinished()){
 		return running;
 	}

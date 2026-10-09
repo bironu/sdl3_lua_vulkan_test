@@ -44,10 +44,12 @@ public:
     // 現在のSceneのonIdle()。Sceneが無ければfalse
 	bool onIdle(uint32_t tick);
 
+	// Sceneの遷移(破棄・予約Sceneの開始・スタックからの復元)を解決する。
+	// onSuspend()は、Active→Suspendedの遷移(現在のSceneを積む・破棄する)でだけ呼ぶ。積まれていた(Suspended)Sceneの破棄は、onDestroy()だけ
 	void updateScenes(uint32_t tick);
 
 	// stackResumeScene_を、古い方(根本)からkeepCount個だけ残して新しい方を
-	// onSuspend()+onDestroy()して捨てる。続けて現在のSceneもfinish()する
+	// onDestroy()して捨てる(積む時点でonSuspend()済みなので、ここでは呼ばない)。続けて現在のSceneもfinish()する
 	// (nullptrなら何もしない)ので、次のupdateScenes()で根本Sceneが復元される。
 	// keepCount=0(デフォルト)で全部捨てる(アプリ終了時)
 	void clearResumeStack(size_t keepCount = 0);

@@ -16,6 +16,7 @@
 #include "ui/UiContext.h"
 #include "ui/UiScript.h"
 #include <memory>
+#include <numbers>
 
 namespace SDL_
 {
@@ -49,7 +50,7 @@ public:
 private:
 	// フィールド(地面のタイル): 原点の角から、x・z の正の向きへ広がる。縁には壁は無いが、外へは出られない(当たり判定)
 	// 調整値(速さ・カメラ・クロスフェードなど)は settings_(res/lua/data/game_settings.lua。F5で読み直す)。カメラの高さ・距離は、モデルの背の高さ(頂点の最大のY。applyModelHeight)に比例する
-	static constexpr float kHalfPi = 1.5707963f;
+	static constexpr float kHalfPi = std::numbers::pi_v<float> / 2;
 	static constexpr float kMinPitch = -kHalfPi; // 真上を向く
 	static constexpr float kMaxPitch = 1.3f;
 	static constexpr float kClimbSlopeSmoothRate = 8.0f;
@@ -65,6 +66,7 @@ private:
 	void setupUi(SDL_::VulkanWindow &window);
 	void applyModelHeight(float height); // プレイヤーのモデルの背の高さから、カメラの高さ・距離を決める(距離は初期値)
 	void reloadSettings();               // 調整値(game_settings.lua)と、地形の設定(field_settings.lua)を読み直す(F5)
+	void forwardKey(const char *name, bool down); // HUDまたはポーズメニューへキー入力を転送(PadNavigatorが扱うDPADは除外)
 	// カメラの位置・注視点・上向きを、yaw/pitch/distanceから求める。地面に潜りそうなときは、体に沿って頭の上へ上がり、真上を向く(ダークソウル風)
 	// 地形(丘・坂)にめり込みそうなときは、頭からカメラへの線が地面に当たる手前まで、カメラを引き寄せる(dtは、離れていくときのなめらかさに使う)
 	void computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up);
@@ -132,6 +134,7 @@ private:
 	// 坂登り: 坂の勾配に応じて、登りのモーションを連続的に混ぜる(切り替えない)
 	float climbWeight_ = 0.0f;   // 登りのモーションの混ざり具合(0=歩き・走りだけ、1=登りだけ)
 	float climbTime_ = 0.0f;     // 登りのモーションの再生位置(ループ)
+	Pose loopTail_;              // applyLooped の継ぎ目用(毎フレームの確保を避ける使い回し)
 	Pose basePose_;              // 登りを混ぜる前の、歩き・走りの姿勢
 	float climbSlope_ = 0.0f;    // 登っている坂の勾配(傾きの目標。なめらかにならしたもの)
 	float tilt_ = 0.0f;          // いまのキャラの傾き(ラジアン。坂を登るとき、坂に沿って後ろへ傾く)

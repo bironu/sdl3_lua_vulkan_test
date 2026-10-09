@@ -1,6 +1,5 @@
 #include "scene/Scene.h"
 #include "scene/SceneHost.h"
-#include "sdl/SDLWindow.h"
 #include "app/Application.h"
 #include "resources/ResourceSet.h"
 #include "resources/Resources.h"
@@ -44,26 +43,14 @@ bool Scene::onIdle(uint32_t tick)
 	return stillRunning;
 }
 
-void Scene::onCreate(uint32_t tick)
+void Scene::registerTask(int taskId, std::shared_ptr<Task> task)
 {
+	manager_->registerTask(taskId, std::move(task));
 }
 
-void Scene::registerTask(int id, std::shared_ptr<Task> task)
+void Scene::unregisterTask(int taskId, bool runFinishAction)
 {
-	manager_->registerTask(id, std::move(task));
-}
-
-void Scene::unregisterTask(int id, bool isFinishAction)
-{
-	manager_->unregisterTask(id, isFinishAction);
-}
-
-void Scene::onDestroy(uint32_t tick)
-{
-}
-
-void Scene::onResume(uint32_t tick)
-{
+	manager_->unregisterTask(taskId, runFinishAction);
 }
 
 void Scene::quit()
