@@ -1,6 +1,7 @@
 ---
 name: reviewer-safety
 description: ヌルポインタ・ダングリング・リソースリーク・二重解放・範囲外アクセスなど危険なコードを許さない厳格なレビュアー。コードレビュー時に並列で呼ばれる。
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

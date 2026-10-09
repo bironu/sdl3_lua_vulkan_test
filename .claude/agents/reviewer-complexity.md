@@ -1,6 +1,7 @@
 ---
 name: reviewer-complexity
 description: 読みにくい技巧的コード・安易なグローバル変数・広域から呼ばれる副作用付き自由関数など、全体の複雑度を上げるコードを許さない厳格なレビュアー。コードレビュー時に並列で呼ばれる。
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

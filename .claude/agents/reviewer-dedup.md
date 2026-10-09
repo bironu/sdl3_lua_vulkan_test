@@ -1,6 +1,7 @@
 ---
 name: reviewer-dedup
 description: 重複コード・類似コード・未到達分岐・未使用関数を許さない厳格なレビュアー。コードレビュー時に並列で呼ばれる。
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 
