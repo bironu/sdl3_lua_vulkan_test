@@ -3,6 +3,7 @@
 
 #include "misc/Uncopyable.h"
 #include <memory>
+#include <utility>
 #include <deque>
 #include <iostream>
 
@@ -22,7 +23,7 @@ public:
 			//std::cout << "get() : new task create" << std::endl;
 		}
 		else {
-			result = queTask_.front();
+			result = std::move(queTask_.front());
 			queTask_.pop_front();
 			//std::cout << "get() : task que count = " << queTask_.size() << std::endl;
 		}
@@ -31,7 +32,7 @@ public:
 
 	void collect(std::shared_ptr<T> task)
 	{
-		queTask_.push_back(task);
+		queTask_.push_back(std::move(task));
 		//std::cout << "collect() : task que count = " << queTask_.size() << std::endl;
 	}
 

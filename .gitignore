@@ -4,7 +4,7 @@
 
 # モーションの元データ(FBXなど)。ゲームが使うのは res/motion/ の変換済み(.vrma)で、FBXは tools の fbx2vrma で変換する
 /motion_src/
-# VMD(MMDのモーション)は管理しない。ゲームが使うのは変換済みの .vrma(確認用の VulkanSampleScene が、置いてあれば使う)
+# VMD(MMDのモーション)は管理しない。ゲームが使うのは変換済みの .vrma
 *.vmd
 
 # macOS

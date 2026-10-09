@@ -4,13 +4,14 @@
 #include "vk/VulkanMath.h"
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace ui
 {
 
 namespace
 {
-constexpr float kPi = 3.14159265358979f;
+constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float toRadians(float degrees) { return degrees * kPi / 180.0f; }
 }
 

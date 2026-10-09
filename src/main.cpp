@@ -2,7 +2,6 @@
 #include "app/Application.h"
 #include "sdl/SDLVulkanWindow.h"
 #include "scene/SceneRegistry.h"
-#include "scene/VulkanSampleScene.h"
 #include "scene/characterselect/CharacterSelectScene.h"
 #include "scene/game/GameScene.h"
 #include "scene/loading/LoadingScene.h"
@@ -27,9 +26,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	// メインウィンドウ=Vulkan。3D描画デモ(VulkanSampleScene)を表示する。
-	// SDL_Renderer方式のサブウィンドウは
-	// SDL_::RendererWindow + SampleSceneで試せる
+	// メインウィンドウ=Vulkan
 	auto vulkan = std::make_shared<VulkanContext>();
 	if(!vulkan->initInstance()){
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Vulkan instance init error.");
@@ -52,14 +49,8 @@ int main(int argc, char *argv[])
 	SceneRegistry::add("loading", []{ return std::make_shared<game::LoadingScene>(); });
 	SceneRegistry::add("characterselect", []{ return std::make_shared<game::CharacterSelectScene>(); });
 	SceneRegistry::add("game", []{ return std::make_shared<game::GameScene>(); });
-	SceneRegistry::add("sample", []{ return std::make_shared<VulkanSampleScene>(); });
-	// 起動直後はOpeningScene(ゲーム本体の流れ)。VULKAN_SAMPLE=1なら、従来の確認用シーン(モデル表示・描画の比較)
-	if(SDL_getenv("VULKAN_SAMPLE") != nullptr){
-		mainWindow->getSceneHost().registerNextScene(std::make_shared<VulkanSampleScene>());
-	}
-	else{
-		mainWindow->getSceneHost().registerNextScene(std::make_shared<game::OpeningScene>());
-	}
+	// 起動直後はOpeningScene(ゲーム本体の流れ)
+	mainWindow->getSceneHost().registerNextScene(std::make_shared<game::OpeningScene>());
 
 	TaskManager manager;
 	const int returnCode = app.run(res, manager);

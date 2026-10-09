@@ -1,6 +1,7 @@
 #include "scene/common/LuaUiScene.h"
 #include "app/Application.h"
 #include "scene/SceneHost.h"
+#include "scene/common/ScreenCoords.h"
 #include "scene/SceneRegistry.h"
 #include "sdl/SDLVulkanWindow.h"
 #include "resources/ResourceSet.h"
@@ -68,14 +69,8 @@ void LuaUiScene::onCreate(uint32_t tick)
 	};
 	script_ = std::make_unique<ui::UiScript>(*ctx_, std::move(callbacks));
 	script_->load(scriptPath_);
+	automation_ = DebugAutomation::fromEnv();
 	startTick_ = lastTick_ = tick;
-}
-
-void LuaUiScene::toScreen(float windowX, float windowY, float &x, float &y)
-{
-	const auto size = getWindow().getSize();
-	x = windowX / static_cast<float>(std::max(size.getX(), 1)) * ctx_->screenWidth();
-	y = windowY / static_cast<float>(std::max(size.getY(), 1)) * ctx_->screenHeight();
 }
 
 void LuaUiScene::dispatch(const SDL_Event &event)
@@ -107,15 +102,13 @@ void LuaUiScene::dispatch(const SDL_Event &event)
 		break;
 	}
 	case SDL_EVENT_MOUSE_MOTION: {
-		float x, y;
-		toScreen(event.motion.x, event.motion.y, x, y);
+		const auto [x, y] = windowToScreen(getWindow(), *ctx_, event.motion.x, event.motion.y);
 		script_->onMouseMove(x, y);
 		break;
 	}
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
 	case SDL_EVENT_MOUSE_BUTTON_UP: {
-		float x, y;
-		toScreen(event.button.x, event.button.y, x, y);
+		const auto [x, y] = windowToScreen(getWindow(), *ctx_, event.button.x, event.button.y);
 		script_->onMouseButton(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN, x, y);
 		break;
 	}
@@ -131,48 +124,19 @@ bool LuaUiScene::onIdle(uint32_t tick)
 	if(isFinished() || !script_){
 		return running;
 	}
-	// 動作確認用: VULKAN_AUTOKEY="キー名@ミリ秒" で、シーン開始からその時間後に、キーが押されたことにする(例: Return@3000)。
-	// VULKAN_AUTORELOAD=ミリ秒 で、その時間後にスクリプトを読み直す(F5と同じ)
-	static const char *autoKey = SDL_getenv("VULKAN_AUTOKEY");
-	static const int autoReload = SDL_getenv("VULKAN_AUTORELOAD") ? SDL_atoi(SDL_getenv("VULKAN_AUTORELOAD")) : -1;
-	if(autoKey){
-		// "Right@1000,Down@1500" のように、カンマで区切って複数指定できる(時刻の昇順で)
-		std::vector<std::pair<std::string, int>> keys;
-		for(size_t start = 0; start < std::strlen(autoKey);){
-			size_t end = std::string(autoKey).find(',', start);
-			end = end == std::string::npos ? std::strlen(autoKey) : end;
-			const std::string spec(autoKey + start, end - start);
-			const auto at = spec.find('@');
-			if(at != std::string::npos){
-				keys.emplace_back(spec.substr(0, at), std::atoi(spec.c_str() + at + 1));
-			}
-			start = end + 1;
-		}
-		while(autoKeyDone_ < keys.size() && static_cast<int>(tick - startTick_) >= keys[autoKeyDone_].second){
-			const std::string key = keys[autoKeyDone_++].first;
-			script_->onKey(key, true);
-			script_->onKey(key, false);
-			if(isFinished()){
-				return running;
-			}
+	// 動作確認用の環境変数(DebugAutomation参照): キー(AUTOKEY)・マウス(AUTOMOUSE)・読み直し(AUTORELOAD)。起点は、シーン開始(読み直しで更新)
+	const int elapsedMs = static_cast<int>(tick - startTick_);
+	while(const std::string *key = automation_.nextKey(elapsedMs)){
+		script_->onKey(*key, true);
+		script_->onKey(*key, false);
+		if(isFinished()){
+			return running;
 		}
 	}
-	// VULKAN_AUTOMOUSE="x,y@ミリ秒" で、シーン開始からその時間後に、マウスが論理画面の(x, y)へ動いたことにする。"x,y@ミリ秒,click" なら、そこでクリックも
-	static const char *autoMouse = SDL_getenv("VULKAN_AUTOMOUSE");
-	if(autoMouse && !autoMouseDone_){
-		float mx = 0.0f, my = 0.0f;
-		int at = 0;
-		if(std::sscanf(autoMouse, "%f,%f@%d", &mx, &my, &at) == 3 && static_cast<int>(tick - startTick_) >= at){
-			autoMouseDone_ = true;
-			script_->onMouseMove(mx, my);
-			if(std::strstr(autoMouse, ",click")){
-				script_->onMouseButton(1, true, mx, my);
-				script_->onMouseButton(1, false, mx, my);
-			}
-		}
+	if(DebugAutomation::Mouse mouse; automation_.takeMouse(elapsedMs, mouse)){
+		DebugAutomation::sendMouse(*script_, mouse);
 	}
-	if(autoReload >= 0 && !autoReloadDone_ && static_cast<int>(tick - startTick_) >= autoReload){
-		autoReloadDone_ = true;
+	if(automation_.takeReload(elapsedMs)){
 		reloadRequested_ = true;
 	}
 	if(reloadRequested_){

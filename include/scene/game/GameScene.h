@@ -8,15 +8,19 @@
 #include "field/FieldMap.h"
 #include "field/FieldMovement.h"
 #include "scene/common/BlobShadow.h"
+#include "scene/common/DebugAutomation.h"
 #include "scene/common/FieldRenderer.h"
 #include "scene/common/PropRenderer.h"
-#include "vk/VulkanMaterial.h"
-#include "vk/VulkanMesh.h"
 #include "vk/VulkanModel.h"
 #include "ui/PadNavigator.h"
 #include "ui/UiContext.h"
 #include "ui/UiScript.h"
 #include <memory>
+
+namespace SDL_
+{
+class VulkanWindow;
+}
 
 namespace game
 {
@@ -38,7 +42,6 @@ public:
 	~GameScene() override;
 
 	void dispatch(const SDL_Event &) override;
-	void onSuspend() override {}
 	void onCreate(uint32_t tick) override;
 	void onDestroy(uint32_t tick) override;
 	bool onIdle(uint32_t tick) override;
@@ -46,24 +49,57 @@ public:
 private:
 	// フィールド(地面のタイル): 原点の角から、x・z の正の向きへ広がる。縁には壁は無いが、外へは出られない(当たり判定)
 	// 調整値(速さ・カメラ・クロスフェードなど)は settings_(res/lua/data/game_settings.lua。F5で読み直す)。カメラの高さ・距離は、モデルの背の高さ(頂点の最大のY。applyModelHeight)に比例する
-	static constexpr float kMinPitch = -1.5707963f; // 真上を向く
+	static constexpr float kHalfPi = 1.5707963f;
+	static constexpr float kMinPitch = -kHalfPi; // 真上を向く
+	static constexpr float kMaxPitch = 1.3f;
+	static constexpr float kClimbSlopeSmoothRate = 8.0f;
+	static constexpr float kLookUpOffset = 4.0f;
+	static constexpr int kAttackCount = 4;
 
-	// カメラの位置・注視点・上向きを、yaw/pitch/distanceから求める。地面に潜りそうなときは、体に沿って頭の上へ上がり、真上を向く(ダークソウル風)
+	// onCreateの段階
+	void setupLighting(SDL_::VulkanWindow &window);
+	void loadField(SDL_::VulkanWindow &window);
+	bool loadPlayer(SDL_::VulkanWindow &window); // 作れなかったらfalse
+	void loadMotions();
+	void measureLoopSeams();
+	void setupUi(SDL_::VulkanWindow &window);
 	void applyModelHeight(float height); // プレイヤーのモデルの背の高さから、カメラの高さ・距離を決める(距離は初期値)
 	void reloadSettings();               // 調整値(game_settings.lua)と、地形の設定(field_settings.lua)を読み直す(F5)
+	// カメラの位置・注視点・上向きを、yaw/pitch/distanceから求める。地面に潜りそうなときは、体に沿って頭の上へ上がり、真上を向く(ダークソウル風)
 	// 地形(丘・坂)にめり込みそうなときは、頭からカメラへの線が地面に当たる手前まで、カメラを引き寄せる(dtは、離れていくときのなめらかさに使う)
 	void computeCamera(float dt, geo::Vector3f &eye, geo::Vector3f &lookAt, geo::Vector3f &up);
 	float fieldWidth() const { return map_.width() * map_.cellSize(); }
 	float fieldDepth() const { return map_.depth() * map_.cellSize(); }
 	void updatePlayer(float dt, uint32_t tick);
+	// updatePlayerの段階: 入力・移動の向き・アクションの開始・動きと登り・傾き・モーションの適用
+	struct PlayerInput
+	{
+		float right = 0.0f, forward = 0.0f;
+		bool run = false;
+		bool actionDown = false;
+		bool attack[kAttackCount] = {}; // R1 R2 L1 L2(キーボードは X V Z C)
+	};
+	struct MoveDir // カメラから見た水平の移動の向き
+	{
+		float x = 0.0f, z = 0.0f; // 単位ベクトル(無入力なら0)
+		float length = 0.0f;      // 入力の大きさ(正規化の前)
+		float magnitude = 0.0f;   // length を1までに抑えたもの
+	};
+	PlayerInput gatherInput(float dt, uint32_t tick);
+	MoveDir moveDirection(const PlayerInput &input) const;
+	void handleActions(float dt, const PlayerInput &input, const MoveDir &dir);
+	void updateLocomotion(float dt, const PlayerInput &input, const MoveDir &dir);
+	void updateTilt(float dt);
+	void applyMotion(float dt);
 	void drawScene(const geo::Matrix4x4f &viewProj);
+	void reloadAll();                    // F5: データ定義・HUD・調整値の読み直し
 	void updateHud(float dt, uint32_t tick);
 	void setPaused(bool paused);
 	void command(const std::string &name, double value); // ポーズ画面のスクリプトからの命令(game.command)
-	void toScreen(float windowX, float windowY, float &x, float &y);
 
 	std::shared_ptr<VulkanModel> player_;
 	// モーション(キャラへ当てるVRMA)。立ち・歩き・走りは、動きに合わせてループする。転がる・攻撃は、1回だけ再生する「アクション」で、終わるまで他の操作を受けない
+	// MotionRoll以降はアクション。並べ替えるときはisActionも直す
 	enum Motion { MotionIdle, MotionWalk, MotionSlowRun, MotionFastRun, MotionClimb, MotionRoll, MotionPunchRight, MotionPunchLeft, MotionKickHigh, MotionRoundhouse, MotionCount };
 	static bool isAction(int motion) { return motion >= MotionRoll; }
 	void startAction(int motion, float dirX, float dirZ);
@@ -75,8 +111,11 @@ private:
 	float loopSeam_[MotionCount] = {}; // モーションの最初と最後の姿勢の差(骨の回転の差の合計。ラジアン)
 	// ループするモーション(立ち・歩き・走り・登り)の、時刻timeの姿勢を当てる。つなぎ目が大きいモーションは、折り返しの部分を、モーションの終わり側と始め側を混ぜてつなぐ
 	void applyLooped(int motion, float time, model::Skeleton &skeleton, model::MorphSet *morphs);
+	// ループのつなぎ目を混ぜる分の長さ(差が小さいときは0、それ以外は設定値と継続時間の下限)
+	float loopOverlap(int motion) const;
 	// ループの1周期の長さ(つなぎ目を混ぜるモーションは、混ぜる分だけ短い)
 	float loopLength(int motion) const;
+
 	// クロスフェード: モーションが切り替わったら、切り替わる直前の姿勢から、新しいモーションの姿勢へ、短い時間でなめらかに混ぜる
 	struct Pose
 	{
@@ -84,6 +123,8 @@ private:
 		std::vector<model::Vec3> translations;
 	};
 	static void capturePose(const model::Skeleton &skeleton, Pose &pose);
+	// 2つの姿勢を混ぜる(回転はslerp、移動は線形補間)
+	void blendPose(model::Skeleton &skeleton, const Pose &from, float alpha);
 	Pose lastPose_;          // 前のフレームの姿勢(混ぜる元)
 	Pose fadeFrom_;          // フェード開始時の姿勢
 	int appliedMotion_ = -1; // 前のフレームに当てたモーション
@@ -109,7 +150,6 @@ private:
 	bool stickMoving_ = false, stickRunning_ = false; // 左スティックの、歩き・走りの状態(遊びを持たせるため、前のフレームの状態を覚える)
 	float stickDip_ = 0.0f;     // 走っている間に、スティックが runExit を下回っている時間
 	int pendingAuto_ = -1;      // 動作確認用: 押されたことにするアクション
-	size_t autoActionDone_ = 0; // 動作確認用の環境変数(VULKAN_AUTOACTION)の、実行済みの数
 	geo::AffineMap playerTransform_;
 	float playerX_ = 0.0f, playerZ_ = 0.0f;
 	float startX_ = 0.0f, startZ_ = 0.0f; // 最初の位置(ポーズ画面の「最初の位置へ戻る」で戻る)
@@ -149,7 +189,7 @@ private:
 	std::unique_ptr<ui::UiScript> pauseMenu_;
 	ui::PadNavigator padNavigator_;
 	bool paused_ = false;
-	bool autoPauseDone_ = false, autoMouseDone_ = false, autoReloadDone_ = false; // 動作確認用の環境変数(VULKAN_AUTOPAUSE/AUTOMOUSE)の、実行済み
+	DebugAutomation automation_; // 動作確認用の環境変数(onCreateで読む)
 	uint32_t startTick_ = 0;
 	float sensitivity_ = 1.0f; // 視点の回転の感度の倍率(ポーズ画面のオプション)
 };

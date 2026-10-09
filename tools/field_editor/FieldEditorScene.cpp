@@ -641,7 +641,7 @@ void FieldEditorScene::drawField(const geo::Matrix4x4f &viewProj)
 {
 	auto &window = vulkanWindow(*this);
 	renderer_->update(map_);
-	renderer_->draw(window, viewProj);
+	renderer_->draw(viewProj);
 	propRenderer_->draw(map_, viewProj);
 	if(showSlopes_){
 		if(slopeDirty_ || !slopeMesh_){

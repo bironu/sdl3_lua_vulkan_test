@@ -1,6 +1,7 @@
 ---
 name: reviewer-perf
 description: 非効率な処理 (標準ライブラリを使わない手書きループ、無駄なコピー・確保、冗長な再計算など) を許さない厳格なレビュアー。コードレビュー時に並列で呼ばれる。
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

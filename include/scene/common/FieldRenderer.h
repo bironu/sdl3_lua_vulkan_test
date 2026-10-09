@@ -34,7 +34,7 @@ public:
 	void update(const field::FieldMap &map);
 
 	// 描画の予約
-	void draw(SDL_::VulkanWindow &window, const geo::Matrix4x4f &viewProj) const;
+	void draw(const geo::Matrix4x4f &viewProj) const;
 
 private:
 	void build(const field::FieldMap &map, int chunkX, int chunkZ);
