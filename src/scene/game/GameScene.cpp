@@ -244,6 +244,12 @@ bool GameScene::loadPlayer(SDL_::VulkanWindow &window)
 	return true;
 }
 
+void GameScene::loadEnemies(SDL_::VulkanWindow &window)
+{
+	enemies_.reset(); // 前の敵のGPUの資源を先に手放す(描画中のフレームが使う分は、描画の側が持っている)
+	enemies_ = std::make_unique<EnemyHorde>(window, resources(), loadEnemyTypes(), map_, playerX_, playerZ_);
+}
+
 void GameScene::loadMotions()
 {
 	if(player_->skeleton()){
@@ -338,6 +344,7 @@ void GameScene::onCreate(uint32_t tick)
 	playerY_ = map_.heightAt(playerX_, playerZ_);
 	playerTransform_.setPos(geo::Vector3f(playerX_, playerY_, playerZ_));
 	playerTransform_.setScale(geo::Vector3f(1.0f, 1.0f, 1.0f));
+	loadEnemies(window);
 	setupUi(window);
 
 	// 動作確認用: VULKAN_PITCH=ラジアン で、カメラの縦の角度の初期値(例: -0.6 で下から見上げる、-1.57 で真上)
@@ -780,7 +787,7 @@ void GameScene::updatePlayer(float dt, uint32_t tick)
 	applyMotion(dt);
 }
 
-void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
+void GameScene::drawScene(const geo::Matrix4x4f &viewProj, const geo::Vector3f &eye)
 {
 	auto &window = vulkanWindow(*this);
 	fieldRenderer_->draw(viewProj);
@@ -788,6 +795,7 @@ void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
 	// プレイヤーと、足元の丸い影
 	window.draw(player_, viewProj, playerTransform_.getMatrix());
 	blob_->draw(window, viewProj, playerX_, playerY_, playerZ_, settings_.player.shadowRadius, settings_.player.shadowOpacity);
+	enemies_->draw(window, viewProj, *blob_, eye);
 }
 
 // F5の読み直し: データ定義(文字列・フォントなど)、HUDのスクリプト、調整値・地形の設定。
@@ -798,6 +806,7 @@ void GameScene::reloadAll()
 	getResources().reload();
 	hud_->load(kHudScript);
 	reloadSettings();
+	loadEnemies(vulkanWindow(*this));
 }
 
 // HUDへ、ゲームの状態を渡して、スクリプトのupdateを進める(描画はdrawHudで)
@@ -926,6 +935,7 @@ bool GameScene::onIdle(uint32_t tick)
 	}
 	if(!paused_){
 		updatePlayer(dt, tick);
+		enemies_->update(dt, map_, movementRules_, playerX_, playerZ_);
 	}
 
 	// 三人称のカメラ
@@ -935,7 +945,7 @@ bool GameScene::onIdle(uint32_t tick)
 	const auto proj = vk_::createPerspective(settings_.camera.fov * (kPi / 180.0f), window.getScreenWidth(), window.getScreenHeight(), settings_.camera.nearPlane, settings_.camera.farPlane);
 	window.setCameraPosition(eye);
 
-	drawScene(proj * view);
+	drawScene(proj * view, eye);
 	if(reloadHud_){
 		reloadHud_ = false;
 		reloadAll();

@@ -12,3 +12,7 @@ target_link_libraries(fbx2vrma PRIVATE model)
 add_executable(field_editor field_editor/main.cpp field_editor/FieldEditorScene.cpp)
 target_link_libraries(field_editor PRIVATE engine)
 add_dependencies(field_editor shaders)
+
+# 丸い生き物の敵(形とモーション)を、glTF 2.0 のバイナリ(.glb)に書き出す(敵の定義の読み込み・CreatureAnimator を使うので、engineライブラリをリンクする)
+add_executable(creature2glb creature2glb.cpp)
+target_link_libraries(creature2glb PRIVATE engine)

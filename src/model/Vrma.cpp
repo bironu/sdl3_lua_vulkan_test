@@ -1,11 +1,11 @@
 #include "model/Vrma.h"
+#include "model/GlbWriter.h"
 #include "model/Json.h"
 #include <SDL3/SDL_iostream.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_stdinc.h>
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <map>
 #include <stdexcept>
@@ -56,61 +56,6 @@ void locate(const std::vector<float> &times, float t, size_t &i0, size_t &i1, fl
 		const float span = times[i1] - times[i0];
 		alpha = span > 1e-9f ? (t - times[i0]) / span : 0.0f;
 	}
-}
-
-// ---- 書き出し ----
-
-class GlbWriter
-{
-public:
-	// 時刻・値の配列をバイナリに足し、accessorの番号を返す。nameで型を決める(SCALAR/VEC3/VEC4)
-	int addAccessor(const std::vector<float> &data, int components, const char *type, bool withMinMax)
-	{
-		while(bin_.size() % 4 != 0){ bin_.push_back(0); }
-		const size_t offset = bin_.size();
-		const size_t bytes = data.size() * sizeof(float);
-		bin_.resize(offset + bytes);
-		std::memcpy(bin_.data() + offset, data.data(), bytes);
-		char view[160];
-		std::snprintf(view, sizeof(view), "{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu}", offset, bytes);
-		views_.push_back(view);
-		const size_t count = data.size() / static_cast<size_t>(components);
-		std::string accessor = "{\"bufferView\":" + std::to_string(views_.size() - 1) + ",\"componentType\":5126,\"count\":" + std::to_string(count)
-			+ ",\"type\":\"" + type + "\"";
-		if(withMinMax && !data.empty()){
-			const auto mm = std::minmax_element(data.begin(), data.end());
-			char buf[96];
-			std::snprintf(buf, sizeof(buf), ",\"min\":[%.9g],\"max\":[%.9g]", *mm.first, *mm.second);
-			accessor += buf;
-		}
-		accessor += "}";
-		accessors_.push_back(accessor);
-		return static_cast<int>(accessors_.size()) - 1;
-	}
-
-	std::string views() const { return join(views_); }
-	std::string accessors() const { return join(accessors_); }
-	const std::vector<uint8_t> &bin() const { return bin_; }
-
-private:
-	static std::string join(const std::vector<std::string> &items)
-	{
-		std::string out;
-		for(size_t i = 0; i < items.size(); ++i){
-			out += (i ? "," : "") + items[i];
-		}
-		return out;
-	}
-	std::vector<uint8_t> bin_;
-	std::vector<std::string> views_;
-	std::vector<std::string> accessors_;
-};
-
-std::string number(float v)
-{
-	char buf[48];
-	std::snprintf(buf, sizeof(buf), "%.9g", v);
-	return buf;
 }
 
 // ---- 読み込み ----
@@ -190,7 +135,7 @@ bool saveVrma(const std::string &fullPath, const HumanoidAnimation &animation)
 		if(i < humanoidNodeCount){
 			const auto &r = animation.rest[i];
 			const Vec3 t = r.parent.empty() ? animation.hipsRest : r.translation;
-			node += ",\"translation\":[" + number(t.x) + "," + number(t.y) + "," + number(t.z) + "]";
+			node += ",\"translation\":[" + GlbWriter::number(t.x) + "," + GlbWriter::number(t.y) + "," + GlbWriter::number(t.z) + "]";
 			const auto kids = children.find(r.bone);
 			if(kids != children.end()){
 				node += ",\"children\":[";
@@ -224,30 +169,7 @@ bool saveVrma(const std::string &fullPath, const HumanoidAnimation &animation)
 		"\"animations\":[{\"name\":\"vrma\",\"samplers\":[" + samplers + "],\"channels\":[" + channels + "]}],"
 		"\"accessors\":[" + writer.accessors() + "],\"bufferViews\":[" + writer.views() + "],"
 		"\"buffers\":[{\"byteLength\":" + std::to_string(writer.bin().size()) + "}]}";
-	while(json.size() % 4 != 0){ json += ' '; }
-	std::vector<uint8_t> bin = writer.bin();
-	while(bin.size() % 4 != 0){ bin.push_back(0); }
-
-	std::vector<uint8_t> out;
-	auto put32 = [&](uint32_t v){ for(int i = 0; i < 4; ++i){ out.push_back(static_cast<uint8_t>(v >> (8 * i))); } };
-	out.insert(out.end(), {'g', 'l', 'T', 'F'});
-	put32(2);
-	put32(static_cast<uint32_t>(12 + 8 + json.size() + 8 + bin.size()));
-	put32(static_cast<uint32_t>(json.size()));
-	out.insert(out.end(), {'J', 'S', 'O', 'N'});
-	out.insert(out.end(), json.begin(), json.end());
-	put32(static_cast<uint32_t>(bin.size()));
-	out.insert(out.end(), {'B', 'I', 'N', 0});
-	out.insert(out.end(), bin.begin(), bin.end());
-
-	SDL_IOStream *io = SDL_IOFromFile(fullPath.c_str(), "wb");
-	if(!io){
-		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "VRMA open error. %s (%s)", SDL_GetError(), fullPath.c_str());
-		return false;
-	}
-	const bool ok = SDL_WriteIO(io, out.data(), out.size()) == out.size();
-	SDL_CloseIO(io);
-	return ok;
+	return writer.save(fullPath, std::move(json));
 }
 
 std::shared_ptr<HumanoidAnimation> loadVrma(const std::string &fullPath)
