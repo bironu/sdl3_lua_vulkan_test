@@ -3,6 +3,7 @@
 #include "resources/Resources.h"
 #include "sdl/SDLWindow.h"
 #include <SDL3/SDL_timer.h>
+#include <utility>
 
 void SceneHost::attach(Application *app, Resources *res, TaskManager *manager)
 {
@@ -35,10 +36,9 @@ void SceneHost::updateScenes(uint32_t tick)
 		if (nextScene_) {
 			if (currentScene_) {
 				currentScene_->onSuspend();
-				stackResumeScene_.push(currentScene_);
+				stackResumeScene_.push(std::move(currentScene_));
 			}
-			currentScene_ = nextScene_;
-			nextScene_.reset();
+			currentScene_ = std::move(nextScene_); // 移動元は空になる
 			currentScene_->prepare(app_, res_, manager_, this);
 			currentScene_->onCreate(tick);
 			// 古いシーンが手放して、少し預かっていたデータを、新しいシーンのonCreateが読み終わったので、手放す
@@ -50,7 +50,7 @@ void SceneHost::updateScenes(uint32_t tick)
 		}
 		else if (!currentScene_) {
 			if (!stackResumeScene_.empty()) {
-				currentScene_ = stackResumeScene_.top();
+				currentScene_ = std::move(stackResumeScene_.top());
 				stackResumeScene_.pop();
 				currentScene_->onResume(tick);
 				continue;
@@ -64,7 +64,7 @@ void SceneHost::clearResumeStack(size_t keepCount)
 {
 	const auto tick = ::SDL_GetTicks();
 	while (stackResumeScene_.size() > keepCount) {
-		auto scene = stackResumeScene_.top();
+		auto scene = std::move(stackResumeScene_.top());
 		stackResumeScene_.pop();
 		scene->onSuspend();
 		scene->onDestroy(tick);
