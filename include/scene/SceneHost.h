@@ -47,7 +47,7 @@ public:
 	void updateScenes(uint32_t tick);
 
 	// stackResumeScene_を、古い方(根本)からkeepCount個だけ残して新しい方を
-	// onSuspend()+onDestroy()して捨てる。続けて現在のSceneもfinish()する
+	// onDestroy()して捨てる(積む時点でonSuspend()済みなので、ここでは呼ばない)。続けて現在のSceneもfinish()する
 	// (nullptrなら何もしない)ので、次のupdateScenes()で根本Sceneが復元される。
 	// keepCount=0(デフォルト)で全部捨てる(アプリ終了時)
 	void clearResumeStack(size_t keepCount = 0);
@@ -59,6 +59,9 @@ public:
 	void swap();
 
 private:
+	// onDestroyだけを呼ぶ。onSuspendはActive→Suspendedの遷移でだけ呼ぶ契約
+	static void destroyScene(Scene &scene, uint32_t tick);
+
 	SDL_::Window &owner_;
 	Application *app_ = nullptr;
 	Resources *res_ = nullptr;

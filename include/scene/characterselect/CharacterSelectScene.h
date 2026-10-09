@@ -36,13 +36,13 @@ public:
 	void onCreate(uint32_t tick) override;
 
 protected:
-	void onFrame(uint32_t tick) override;
+	void onFrame(uint32_t tick, float dt) override;
 	void onCommand(const std::string &name, double value) override;
 
 private:
-	enum State
+	enum class State
 	{
-		kNotRequested = 0,
+		kNotRequested,
 		kQueued,   // 読み込み待ち・読み込み中(別スレッド)
 		kDataReady, // データ(CPU)が読めた。GPUの資源はこれから
 		kReady,    // 表示できる
@@ -51,10 +51,15 @@ private:
 	struct Slot
 	{
 		CharacterInfo info;
-		std::atomic<int> state{kNotRequested};
+		std::atomic<State> state{State::kNotRequested};
 		std::shared_ptr<VulkanModel> model;
 		std::unique_ptr<model::VrmaPlayer> player;
 		float time = 0.0f;
+	};
+	struct Placed
+	{
+		int index;
+		float x, z;
 	};
 
 	int current() const; // 選択中の番号
@@ -64,10 +69,10 @@ private:
 	void workerLoop();
 
 	std::vector<std::unique_ptr<Slot>> slots_;
+	std::vector<Placed> placed_; // 毎フレームの描画順序(使い回す)
 	std::unique_ptr<BlobShadow> blob_;
 	float rotation_ = 0.0f;     // 表示上の回転(番号の単位。滑らかに目標へ近づく)
 	int target_ = 0;            // 目標(回した分だけ増減。選択中は target_ を個数で割った余り)
-	uint32_t lastTick_ = 0;
 	bool confirmed_ = false;
 
 	// 読み込みの別スレッド。preload_はこのスレッドだけが使う(読んだデータを持っておく入れ物)

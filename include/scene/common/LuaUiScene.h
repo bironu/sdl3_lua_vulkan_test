@@ -26,8 +26,8 @@ public:
 	bool onIdle(uint32_t tick) override;
 
 protected:
-	// 派生クラスの毎フレームの処理(スクリプトのupdate()の後、描画の前)
-	virtual void onFrame(uint32_t) {}
+	// 派生クラスの毎フレームの処理(スクリプトのupdate()の後、描画の前)。dtは前フレームからの秒数(上限0.1)
+	virtual void onFrame(uint32_t, float) {}
 	// スクリプトの game.command(名前, 値) を受ける(派生クラスが、シーンごとの命令を実装する)
 	virtual void onCommand(const std::string &, double) {}
 	ui::UiContext &uiContext() { return *ctx_; }

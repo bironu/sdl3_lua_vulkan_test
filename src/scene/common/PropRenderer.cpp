@@ -52,7 +52,11 @@ float PropRenderer::radius(const std::string &name)
 
 void PropRenderer::drawOne(const std::string &name, float x, float y, float z, float yaw, float scale, const geo::Matrix4x4f &viewProj)
 {
-	const Entry &e = entry(name);
+	drawEntry(entry(name), x, y, z, yaw, scale, viewProj);
+}
+
+void PropRenderer::drawEntry(const Entry &e, float x, float y, float z, float yaw, float scale, const geo::Matrix4x4f &viewProj)
+{
 	if(!e.model){
 		return;
 	}
@@ -65,8 +69,14 @@ void PropRenderer::drawOne(const std::string &name, float x, float y, float z, f
 
 void PropRenderer::draw(const field::FieldMap &map, const geo::Matrix4x4f &viewProj)
 {
+	// 番号→Entryの対応は、このフレームだけ持つ(エディタがマップを読み直すと、番号の指す名前が変わるため)。容量は使い回す
+	resolved_.assign(map.propNameCount(), nullptr);
 	for(const auto &prop : map.props()){
-		drawOne(map.propName(prop.prop), prop.x, map.propBaseY(prop), prop.z, prop.yaw, prop.scale, viewProj);
+		const Entry *&e = resolved_[prop.prop];
+		if(!e){
+			e = &entry(map.propName(prop.prop));
+		}
+		drawEntry(*e, prop.x, map.propBaseY(prop), prop.z, prop.yaw, prop.scale, viewProj);
 	}
 }
 

@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 class ResourceSet;
 namespace SDL_
@@ -47,10 +48,12 @@ private:
 		field::PropFootprint footprint;
 	};
 	const Entry &entry(const std::string &name);
+	void drawEntry(const Entry &e, float x, float y, float z, float yaw, float scale, const geo::Matrix4x4f &viewProj);
 
 	SDL_::VulkanWindow &window_;
 	ResourceSet &resources_;
 	std::map<std::string, Entry> entries_;
+	std::vector<const Entry *> resolved_; // draw の間だけ有効な、番号→Entry(毎フレーム作り直す)
 };
 
 } // namespace game

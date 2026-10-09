@@ -23,6 +23,8 @@ struct GameSettings
 		float rollCancelProgress = 0.92f; // 転がって進んだ割合(0〜1)がこれを超えて、立ち上がる間に、スティックを倒していたら、立ち上がりを切り上げて、歩き・走りへつなぐ
 		float rollRate = 2.0f;       // 転がるモーションの再生速度の倍率(1でモーションの元の速さ。大きいほど素早く転がる)
 		float rollMotionTravel = 4.52f; // Stand To Rollのモーションが、元々進む距離(変換時のログの値。進み方の形を求めるのに使う。転がる距離を変えるには rollDistance を変える)
+		float shadowRadius = 0.5f;   // 足もとの丸い影の半径(m)
+		float shadowOpacity = 0.55f; // 同、濃さ(0〜1)
 		float turnSpeed = 12.0f;     // キャラが進む向きへ向く速さ(ラジアン/秒の目安)
 	} player;
 	struct Climb
@@ -47,7 +49,7 @@ struct GameSettings
 		float moveEnter = 0.25f;     // 左スティックをこれ以上傾けると、歩き出す(それより小さい傾きは、遊びとして無視する)
 		float moveExit = 0.15f;      // 歩いている間は、これを下回るまで歩き続ける
 		float tapTime = 0.25f;       // Aボタンを、これより短く押して離したら単押し(転がる)。これ以上押し続けたら長押し(全力で走る)
-		float rollOnPress = 1.0f;    // 1: Aボタンを押した瞬間に転がり始める(押しっぱなしにしても転がる。その後も押し続けて、スティックを最大にしていれば、Fast Run)。0: 離したときに、単押しなら転がる(長押しは転がらず、Fast Run)
+		bool rollOnPress = true;     // true: Aボタンを押した瞬間に転がり始める(押しっぱなしにしても転がる。その後も押し続けて、スティックを最大にしていれば、Fast Run)。false: 離したときに、単押しなら転がる(長押しは転がらず、Fast Run)
 		float triggerOn = 0.5f;      // L2/R2を押したとみなすトリガーの値
 	} input;
 	struct Camera
@@ -62,6 +64,10 @@ struct GameSettings
 		float minArm = 0.5f;          // 地形に遮られたときの、頭からカメラまでの最短の距離
 		float armRecover = 5.0f;      // 遮りが無くなったときに、元の距離へ戻る速さ(1/秒。大きいほど速い)
 		float bodyDistance = 0.7f;    // 真上へ向けるとき、カメラが体に沿って上がる、体の中心からの水平の距離
+		float fov = 60.0f;            // 縦の画角(度)
+		float nearPlane = 0.1f;       // 手前のクリップ面(m)
+		float farPlane = 200.0f;      // 奥のクリップ面(m)
+		float mouseSpeed = 0.003f;    // マウスの1ピクセルあたりの回転(ラジアン。設定画面の感度を掛ける前)
 		float approachFraction = 0.35f; // 真上へ向ける動きのうち、体の近くへ寄る(低いまま近づく)のに使う割合。残りで体に沿って上がる
 	} camera;
 	struct Fade

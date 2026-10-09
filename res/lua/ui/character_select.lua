@@ -1,8 +1,6 @@
 -- キャラクタ選択画面(CharacterSelectScene)。3Dで水平に回るキャラは、C++が描く。このスクリプトは、名前・矢印・案内・読み込み中の円を出し、入力を受ける。
 --   左右(←→ / 十字キー / 左スティック): 回す  Enter / PadA: 決定(読み込みが終わっていれば)  Backspace / PadB: Openingへ戻る  Esc: 終了
--- C++から world.selected(1始まり) / count / ready(選択中の読み込みが終わったか) / failed が渡される。命令は game.command("rotate", ±1) / ("confirm")
-
-loadScript("res/lua/data/characters.lua") -- characters
+-- C++から world.selected(1始まり) / count / world.strings.name(選択中のキャラの名前) / ready(選択中の読み込みが終わったか) / failed が渡される。命令は game.command("rotate", ±1) / ("confirm")
 
 local spinnerDots = 12
 local spinnerRadius = 46
@@ -89,10 +87,11 @@ end
 
 function update(dt, time)
 	local index = math.floor(world.selected or 1)
-	if index ~= shownIndex and characters[index] then
+	local name = world.strings.name
+	if index ~= shownIndex and name and name ~= "" then
 		shownIndex = index
-		nameText:setText(characters[index].name)
-		countText:setText(index .. " / " .. #characters)
+		nameText:setText(name)
+		countText:setText(index .. " / " .. math.floor(world.count or 0))
 		nameText:setAlpha(0)
 		nameText:animate("alpha", 1, 0.25, "decelerate")
 	end

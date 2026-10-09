@@ -22,7 +22,7 @@ public:
 	void onCreate(uint32_t tick) override;
 
 protected:
-	void onFrame(uint32_t tick) override;
+	void onFrame(uint32_t tick, float dt) override;
 
 private:
 	// 読んだデータを持っておく入れ物(別スレッドで使う)。シーンの終わりで手放され、少しの間Resourcesが預かるので、GameSceneが取れる

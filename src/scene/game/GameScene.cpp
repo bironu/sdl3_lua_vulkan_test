@@ -10,19 +10,17 @@
 #include "scene/character/CharacterList.h"
 #include "scene/characterselect/CharacterSelectScene.h"
 #include "scene/common/ModelFactory.h"
+#include "scene/common/SceneWindow.h"
 #include "scene/common/ScreenCoords.h"
 #include "scene/game/GameSession.h"
 #include "scene/SceneHost.h"
 #include "scene/SceneRegistry.h"
-#include "vk/PrimitiveMeshes.h"
 #include "vk/VulkanMath.h"
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_log.h>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
-#include <cstdio>
-#include <cstring>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -34,9 +32,10 @@ namespace
 {
 constexpr float kPi = std::numbers::pi_v<float>;
 
-SDL_::VulkanWindow &vulkanWindow(Scene &scene)
+// フィールドの範囲内に収める。下限が上限を超えないよう max を使う
+float clampInside(float v, float r, float size)
 {
-	return static_cast<SDL_::VulkanWindow &>(scene.getWindow());
+	return std::clamp(v, r, std::max(r, size - r));
 }
 
 // 角度aをtargetへ、最短の向きで最大maxStepだけ近づける
@@ -93,6 +92,9 @@ void GameScene::command(const std::string &name, double value)
 		motionTime_ = 0.0f;
 		appliedMotion_ = -1; // フェードしない(急に位置が変わるので)
 		fadeDuration_ = 0.0f;
+		climbWeight_ = climbSlope_ = tilt_ = 0.0f; // 登りの混ぜ・傾きを残さない
+		cameraArm_ = 1.0f;
+		pendingAuto_ = -1;
 		if(player_){
 			player_->resetPhysics(); // 髪やスカートの揺れを、元の位置へ
 		}
@@ -104,6 +106,16 @@ void GameScene::command(const std::string &name, double value)
 	}
 	else{
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "game.command: unknown command: %s", name.c_str());
+	}
+}
+
+void GameScene::forwardKey(const char *name, bool down)
+{
+	if(paused_ && pauseMenu_){
+		pauseMenu_->onKey(name, down);
+	}
+	else if(hud_){
+		hud_->onKey(name, down);
 	}
 }
 
@@ -119,12 +131,7 @@ void GameScene::dispatch(const SDL_Event &event)
 			reloadHud_ = true; // HUDのスクリプトの読み直し(次のonIdleで。ポーズ画面は、開くたびに読み直す)
 		}
 		else if(!event.key.repeat){
-			if(paused_ && pauseMenu_){
-				pauseMenu_->onKey(SDL_GetKeyName(event.key.key), event.type == SDL_EVENT_KEY_DOWN);
-			}
-			else if(hud_){
-				hud_->onKey(SDL_GetKeyName(event.key.key), event.type == SDL_EVENT_KEY_DOWN);
-			}
+			forwardKey(SDL_GetKeyName(event.key.key), event.type == SDL_EVENT_KEY_DOWN);
 		}
 		break;
 	case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
@@ -137,15 +144,10 @@ void GameScene::dispatch(const SDL_Event &event)
 			break;
 		}
 		const char *name = ui::padButtonName(button);
+		// PadNavigator が DPAD を扱うので除外する
 		if(*name && button != SDL_GAMEPAD_BUTTON_DPAD_UP && button != SDL_GAMEPAD_BUTTON_DPAD_DOWN
 			&& button != SDL_GAMEPAD_BUTTON_DPAD_LEFT && button != SDL_GAMEPAD_BUTTON_DPAD_RIGHT){
-			const bool down = event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
-			if(paused_ && pauseMenu_){
-				pauseMenu_->onKey(name, down);
-			}
-			else if(hud_){
-				hud_->onKey(name, down);
-			}
+			forwardKey(name, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
 		}
 		break;
 	}
@@ -156,9 +158,9 @@ void GameScene::dispatch(const SDL_Event &event)
 			break;
 		}
 		// 視点の回転(マウスはウィンドウに取り込み済み): 右へ動かすと右を向く、下へ動かすと見下ろす
-		const float kRadiansPerPixel = 0.003f * sensitivity_;
-		cameraYaw_ -= event.motion.xrel * kRadiansPerPixel;
-		cameraPitch_ = std::clamp(cameraPitch_ + event.motion.yrel * kRadiansPerPixel, kMinPitch, kMaxPitch);
+		const float radiansPerPixel = settings_.camera.mouseSpeed * sensitivity_;
+		cameraYaw_ -= event.motion.xrel * radiansPerPixel;
+		cameraPitch_ = std::clamp(cameraPitch_ + event.motion.yrel * radiansPerPixel, kMinPitch, kMaxPitch);
 		break;
 	}
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -206,7 +208,6 @@ void GameScene::loadField(SDL_::VulkanWindow &window)
 	startX_ = playerX_;
 	startZ_ = playerZ_;
 	// 動作確認用: VULKAN_START=x,z で、開始位置を指定する(最初の位置へ戻るときも、そこへ戻る)
-	automation_ = DebugAutomation::fromEnv();
 	if(const auto &start = automation_.startPosition()){
 		startX_ = playerX_ = start->first;
 		startZ_ = playerZ_ = start->second;
@@ -297,17 +298,16 @@ void GameScene::measureLoopSeams()
 void GameScene::setupUi(SDL_::VulkanWindow &window)
 {
 	// HUD: Luaのウィジェット。スクリプトの読み込み一覧(hud.assets.lua)があれば、先に読む
-	resources().loadManifest("res/lua/ui/hud.assets.lua");
+	resources().loadManifest(ResourcePaths::assetsManifestFor(kHudScript));
 	uiContext_ = std::make_unique<ui::UiContext>(window, getResources(), resources());
-	ui::UiScript::Callbacks callbacks;
-	callbacks.quit = [this]{ quit(); };
-	callbacks.command = [this](const std::string &name, double value){ command(name, value); };
-	hud_ = std::make_unique<ui::UiScript>(*uiContext_, std::move(callbacks));
+	// HUD とポーズ画面で共通のコールバック
+	ui::UiScript::Callbacks baseCallbacks;
+	baseCallbacks.quit = [this]{ quit(); };
+	baseCallbacks.command = [this](const std::string &name, double value){ command(name, value); };
+	hud_ = std::make_unique<ui::UiScript>(*uiContext_, baseCallbacks);
 	hud_->load(kHudScript);
-	// ポーズ画面(開くときにload)
-	ui::UiScript::Callbacks pauseCallbacks;
-	pauseCallbacks.quit = [this]{ quit(); };
-	pauseCallbacks.command = [this](const std::string &name, double value){ command(name, value); };
+	// ポーズ画面(開くときにload): 共通のコールバックにシーン遷移機能を追加
+	ui::UiScript::Callbacks pauseCallbacks = baseCallbacks;
 	pauseCallbacks.changeScene = [this](const std::string &name){
 		if(auto next = SceneRegistry::create(name)){
 			getHost().registerNextScene(std::move(next));
@@ -321,6 +321,7 @@ void GameScene::onCreate(uint32_t tick)
 {
 	Scene::onCreate(tick);
 	settings_ = loadGameSettings(); // 速さ・カメラ・クロスフェードなどの調整値(res/lua/data/game_settings.lua。F5で読み直す)
+	automation_ = DebugAutomation::fromEnv();
 	auto &window = vulkanWindow(*this);
 	auto &res = getResources();
 	window.setScreenSize(static_cast<float>(res.getScreenWidth()), static_cast<float>(res.getScreenHeight()));
@@ -438,13 +439,8 @@ void GameScene::blendPose(model::Skeleton &skeleton, const Pose &from, float alp
 float GameScene::loopLength(int motion) const
 {
 	const auto &player = motions_[motion];
-	if(!player){
-		return 1.0f;
-	}
-	if(loopSeam_[motion] <= settings_.motion.seamThreshold){
-		return player->duration();
-	}
-	return player->duration() - loopOverlap(motion);
+	// fmod の除数が 0 になるのを防ぐ
+	return player ? player->duration() - loopOverlap(motion) : 1.0f;
 }
 
 // つなぎ目を混ぜるループ: 周期 L = 長さ - F。時刻 u が 0〜F の間は、(終わり側 L+u の姿勢)から(始め側 u の姿勢)へ混ぜる(u=0 で前の周期の終わりと、u=F で始めの続きと、ちょうどつながる)
@@ -467,28 +463,27 @@ void GameScene::applyLooped(int motion, float time, model::Skeleton &skeleton, m
 		return;
 	}
 	player->apply(skeleton, morphs, length + u);
-	Pose tail;
-	capturePose(skeleton, tail);
+	capturePose(skeleton, loopTail_);
 	skeleton.resetPose();
 	player->apply(skeleton, morphs, u);
 	const float t = u / overlap;
 	const float alpha = smoothstep01(t);
-	blendPose(skeleton, tail, alpha);
+	blendPose(skeleton, loopTail_, alpha);
 }
 
 bool GameScene::stepMove(float dirX, float dirZ, float distance, float maxSlope)
 {
 	const float beforeX = playerX_, beforeZ = playerZ_;
 	// フィールドの縁: 外へは出られない(壁に沿っては滑れる。軸ごとに止める)
-	const float targetX = std::clamp(playerX_ + dirX * distance, settings_.player.radius, fieldWidth() - settings_.player.radius);
-	const float targetZ = std::clamp(playerZ_ + dirZ * distance, settings_.player.radius, fieldDepth() - settings_.player.radius);
+	const float targetX = clampInside(playerX_ + dirX * distance, settings_.player.radius, fieldWidth());
+	const float targetZ = clampInside(playerZ_ + dirZ * distance, settings_.player.radius, fieldDepth());
 	// 地面: 歩けないタイル(水)と急な勾配へは進めない(沿って滑れる)
 	field::moveOnField(map_, movementRules_, settings_.player.radius, playerX_, playerZ_, targetX, targetZ, maxSlope);
 	// 置物: めり込んだら、外へ押し出す(壁に沿って滑れる)。押し出しでフィールドの外・水・急な所へ出たら、押し出す前へ戻す
 	float pushedX = playerX_, pushedZ = playerZ_;
 	if(propCollision_.resolve(pushedX, pushedZ, settings_.player.radius)){
-		pushedX = std::clamp(pushedX, settings_.player.radius, fieldWidth() - settings_.player.radius);
-		pushedZ = std::clamp(pushedZ, settings_.player.radius, fieldDepth() - settings_.player.radius);
+		pushedX = clampInside(pushedX, settings_.player.radius, fieldWidth());
+		pushedZ = clampInside(pushedZ, settings_.player.radius, fieldDepth());
 		float checkX = playerX_, checkZ = playerZ_;
 		if(field::moveOnField(map_, movementRules_, settings_.player.radius, checkX, checkZ, pushedX, pushedZ) && checkX == pushedX && checkZ == pushedZ){
 			playerX_ = pushedX;
@@ -609,7 +604,7 @@ void GameScene::handleActions(float dt, const PlayerInput &input, const MoveDir 
 	if(input.actionDown){
 		actionHeldTime_ += dt;
 	}
-	if(settings_.input.rollOnPress > 0.5f){
+	if(settings_.input.rollOnPress){
 		if(input.actionDown && !actionHeld_ && !busy){
 			startAction(MotionRoll, dir.x, dir.z); // 押した瞬間に転がり始める
 		}
@@ -644,9 +639,7 @@ void GameScene::updateLocomotion(float dt, const PlayerInput &input, const MoveD
 {
 	const float dx = dir.x, dz = dir.z, length = dir.length;
 	walking_ = false;
-	int wanted = MotionIdle;
 	if(isAction(motion_)){
-		wanted = motion_;
 		const auto &player = motions_[motion_];
 		const float rate = motion_ == MotionRoll ? settings_.player.rollRate : 1.0f;
 		const float before = motionTime_ / player->duration();
@@ -654,21 +647,22 @@ void GameScene::updateLocomotion(float dt, const PlayerInput &input, const MoveD
 		if(motion_ == MotionRoll){
 			// 前へ進むのは、モーションの足の動きに合わせて(足が着いて立ち上がる間は進まない)。飛ばした頭の分は、進む距離に含めない(残りで、全部の距離を進む)
 			const float after = std::min(motionTime_ / player->duration(), 1.0f);
+			const float afterProgress = rollProgress(after);
 			const float skipped = rollProgress(std::min(settings_.player.rollStartOffset / player->duration(), 0.5f));
 			const float scale = 1.0f / std::max(1.0f - skipped, 1e-3f);
-			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance * scale * (rollProgress(after) - rollProgress(before)));
+			stepMove(rollDirX_, rollDirZ_, settings_.player.rollDistance * scale * (afterProgress - rollProgress(before)));
 			// 転がり終わって立ち上がる間に、スティックを倒していたら、立ち上がりを切り上げて、そのまま歩き・走りへつなぐ
-			if(length > 0.0f && rollProgress(after) >= settings_.player.rollCancelProgress){
+			if(length > 0.0f && afterProgress >= settings_.player.rollCancelProgress){
 				motionTime_ = player->duration();
 			}
 		}
 		if(motionTime_ >= player->duration()){
 			motion_ = MotionIdle; // 終わり。下で、立ち・歩き・走り・登りへ戻る
 			motionTime_ = 0.0f;
-			wanted = MotionIdle;
 		}
 	}
 	if(!isAction(motion_)){
+		int wanted = MotionIdle;
 		float speed = 0.0f;
 		const float climbLimit = movementRules_.maxClimbSlope * 1.05f;
 		// 坂登り: 切り替えではなく、坂の勾配に応じて、登りのモーションを連続的に混ぜる(climbWeight_: 0=歩き・走りだけ、1=登りだけ)。
@@ -702,12 +696,7 @@ void GameScene::updateLocomotion(float dt, const PlayerInput &input, const MoveD
 			}
 			// 速さも、登りの混ざり具合に合わせて、歩き・走りの速さから登りの速さへ。急な坂へは、登りの上限(maxClimbSlope)まで進める
 			speed = speed + (settings_.player.climbSpeed - speed) * climbWeight_;
-			if(motions_[MotionClimb]){
-				stepMove(dx, dz, speed * dt, climbLimit);
-			}
-			else{
-				stepMove(dx, dz, speed * dt);
-			}
+			stepMove(dx, dz, speed * dt, motions_[MotionClimb] ? climbLimit : -1.0f);
 			heading_ = approachAngle(heading_, std::atan2(dx, dz), settings_.player.turnSpeed * dt);
 		}
 		// モーションの切り替え: ループの途中の位置(割合)を引き継ぐ(足の運びが飛ばないように)
@@ -798,7 +787,7 @@ void GameScene::drawScene(const geo::Matrix4x4f &viewProj)
 	propRenderer_->draw(map_, viewProj);
 	// プレイヤーと、足元の丸い影
 	window.draw(player_, viewProj, playerTransform_.getMatrix());
-	blob_->draw(window, viewProj, playerX_, playerY_, playerZ_, 0.5f, 0.55f);
+	blob_->draw(window, viewProj, playerX_, playerY_, playerZ_, settings_.player.shadowRadius, settings_.player.shadowOpacity);
 }
 
 // F5の読み直し: データ定義(文字列・フォントなど)、HUDのスクリプト、調整値・地形の設定。
@@ -943,7 +932,7 @@ bool GameScene::onIdle(uint32_t tick)
 	geo::Vector3f eye, lookAt, up;
 	computeCamera(dt, eye, lookAt, up);
 	const auto view = geo::createLookAt<float>(eye, lookAt, up);
-	const auto proj = vk_::createPerspective(kPi / 3.0f, window.getScreenWidth(), window.getScreenHeight(), 0.1f, 200.0f);
+	const auto proj = vk_::createPerspective(settings_.camera.fov * (kPi / 180.0f), window.getScreenWidth(), window.getScreenHeight(), settings_.camera.nearPlane, settings_.camera.farPlane);
 	window.setCameraPosition(eye);
 
 	drawScene(proj * view);

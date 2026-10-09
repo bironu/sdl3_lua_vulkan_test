@@ -3,6 +3,7 @@
 #include "geo/Calculator.h"
 #include "resources/Resources.h"
 #include "scene/common/ModelFactory.h"
+#include "scene/common/SceneWindow.h"
 #include "scene/game/GameSession.h"
 #include "sdl/SDLVulkanWindow.h"
 #include "vk/VulkanMath.h"
@@ -47,7 +48,7 @@ int CharacterSelectScene::current() const
 void CharacterSelectScene::onCreate(uint32_t tick)
 {
 	LuaUiScene::onCreate(tick);
-	auto &window = static_cast<SDL_::VulkanWindow &>(getWindow());
+	auto &window = vulkanWindow(*this);
 	window.setClearColor(0.10f, 0.12f, 0.20f);
 	window.setShadowMapsEnabled(false);
 	window.clearPointLights();
@@ -74,8 +75,6 @@ void CharacterSelectScene::onCreate(uint32_t tick)
 			rotation_ = static_cast<float>(i);
 		}
 	}
-	lastTick_ = tick;
-
 	preload_ = std::make_unique<ResourceSet>(getResources());
 	worker_ = std::thread([this]{ workerLoop(); });
 	requestAroundCurrent();
@@ -86,8 +85,8 @@ void CharacterSelectScene::request(int index, bool urgent)
 	if(index < 0 || index >= static_cast<int>(slots_.size())){
 		return;
 	}
-	int expected = kNotRequested;
-	if(!slots_[index]->state.compare_exchange_strong(expected, kQueued)){
+	State expected = State::kNotRequested;
+	if(!slots_[index]->state.compare_exchange_strong(expected, State::kQueued)){
 		return;
 	}
 	{
@@ -134,22 +133,22 @@ void CharacterSelectScene::workerLoop()
 		try{
 			const auto data = preload_->modelWithImages(slot.info.model);
 			preload_->animation(slot.info.motion);
-			slot.state = data ? kDataReady : kFailed;
+			slot.state = data ? State::kDataReady : State::kFailed;
 		}
 		catch(const std::exception &e){
 			SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to load %s: %s", slot.info.model.c_str(), e.what());
-			slot.state = kFailed;
+			slot.state = State::kFailed;
 		}
 	}
 }
 
 void CharacterSelectScene::createGpuResources(Slot &slot)
 {
-	auto &window = static_cast<SDL_::VulkanWindow &>(getWindow());
+	auto &window = vulkanWindow(*this);
 	slot.model = createVulkanModel(window, resources(), slot.info.model);
 	if(!slot.model){
 		SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to create the model: %s", slot.info.model.c_str());
-		slot.state = kFailed;
+		slot.state = State::kFailed;
 		return;
 	}
 	slot.model->setAmbientBoost(0.0f);
@@ -160,8 +159,14 @@ void CharacterSelectScene::createGpuResources(Slot &slot)
 				slot.player->setInPlace(true);
 			}
 		}
+		else{
+			SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "CharacterSelectScene: animation not found: %s", slot.info.motion.c_str());
+		}
 	}
-	slot.state = kReady;
+	else{
+		SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "CharacterSelectScene: skeleton not found in model: %s", slot.info.model.c_str());
+	}
+	slot.state = State::kReady;
 }
 
 void CharacterSelectScene::onCommand(const std::string &name, double value)
@@ -175,34 +180,32 @@ void CharacterSelectScene::onCommand(const std::string &name, double value)
 	}
 	else if(name == "confirm"){
 		Slot &slot = *slots_[current()];
-		if(slot.state != kReady){
+		if(slot.state != State::kReady){
 			return; // 読み込み中は決定できない
 		}
 		GameSession &session = GameSession::instance();
 		session.character = slot.info.model;
 		slot.player.reset();
 		session.model = std::move(slot.model); // GPU上のモデルを、GameSceneへ引き継ぐ
-		slot.state = kNotRequested;
+		slot.state = State::kNotRequested;
 		confirmed_ = true;
 		changeScene("game");
 	}
 }
 
-void CharacterSelectScene::onFrame(uint32_t tick)
+void CharacterSelectScene::onFrame(uint32_t tick, float dt)
 {
 	if(slots_.empty() || isFinished()){
 		return;
 	}
-	auto &window = static_cast<SDL_::VulkanWindow &>(getWindow());
-	const float dt = std::min(static_cast<float>(tick - lastTick_) * 0.001f, 0.1f);
-	lastTick_ = tick;
+	auto &window = vulkanWindow(*this);
 	const int count = static_cast<int>(slots_.size());
 
 	// 読み終わったデータから、GPUの資源を1フレームに1体だけ作る(選択中のものを先に)
 	{
 		const auto tryCreate = [this](int i){
 			Slot &slot = *slots_[i];
-			if(slot.state != kDataReady){
+			if(slot.state != State::kDataReady){
 				return false;
 			}
 			createGpuResources(slot);
@@ -224,21 +227,16 @@ void CharacterSelectScene::onFrame(uint32_t tick)
 	window.setCameraPosition(kCameraEye);
 
 	// 奥のものから描く(足元の影は半透明なので、モデルより先に、全員分を奥から)
-	struct Placed
-	{
-		int index;
-		float x, z;
-	};
-	std::vector<Placed> placed;
+	placed_.clear();
 	for(int i = 0; i < count; ++i){
 		const float angle = (static_cast<float>(i) - rotation_) * 2.0f * kPi / static_cast<float>(count);
-		placed.push_back({i, std::sin(angle) * kRingRadiusX, (std::cos(angle) - 1.0f) * kRingRadiusZ});
+		placed_.push_back({i, std::sin(angle) * kRingRadiusX, (std::cos(angle) - 1.0f) * kRingRadiusZ});
 	}
-	std::sort(placed.begin(), placed.end(), [](const Placed &a, const Placed &b){ return a.z < b.z; });
-	for(const auto &p : placed){
+	std::sort(placed_.begin(), placed_.end(), [](const Placed &a, const Placed &b){ return a.z < b.z; });
+	for(const auto &p : placed_){
 		Slot &slot = *slots_[p.index];
 		blob_->draw(window, viewProj, p.x, 0.0f, p.z, kShadowRadius, kShadowOpacity);
-		if(slot.state != kReady || !slot.model){
+		if(slot.state != State::kReady || !slot.model){
 			continue;
 		}
 		if(auto *skeleton = slot.model->skeleton()){
@@ -261,10 +259,11 @@ void CharacterSelectScene::onFrame(uint32_t tick)
 	// 画面の部品(Lua)へ、状態を渡す
 	auto &world = uiContext().world();
 	const Slot &selected = *slots_[current()];
+	world.strings["name"] = selected.info.name;
 	world.values["selected"] = static_cast<float>(current() + 1);
 	world.values["count"] = static_cast<float>(count);
-	world.values["ready"] = selected.state == kReady ? 1.0f : 0.0f;
-	world.values["failed"] = selected.state == kFailed ? 1.0f : 0.0f;
+	world.values["ready"] = selected.state == State::kReady ? 1.0f : 0.0f;
+	world.values["failed"] = selected.state == State::kFailed ? 1.0f : 0.0f;
 }
 
 } // namespace game

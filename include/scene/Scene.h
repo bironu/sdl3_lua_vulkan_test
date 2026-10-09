@@ -25,15 +25,16 @@ public:
 
 	void finish() { isFinished_ = true; }
 	bool isFinished() const { return isFinished_; }
-	void registerTask(int, std::shared_ptr<Task>);
-	void unregisterTask(int, bool);
+	void registerTask(int taskId, std::shared_ptr<Task>);
+	void unregisterTask(int taskId, bool runFinishAction);
 
 	virtual void dispatch(const SDL_Event &) = 0;
 	virtual void onSuspend() {}
+	// 再描画を続ける場合は true、ウィンドウが非アクティブなら false を返す
 	virtual bool onIdle(uint32_t);
-	virtual void onCreate(uint32_t);
-	virtual void onDestroy(uint32_t);
-	virtual void onResume(uint32_t);
+	virtual void onCreate(uint32_t) {}
+	virtual void onDestroy(uint32_t) {}
+	virtual void onResume(uint32_t) {}
 
 	void swap();
 	void quit();
